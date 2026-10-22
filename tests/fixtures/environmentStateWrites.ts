@@ -126,6 +126,26 @@ export const PROJECTED_ROWS: readonly TimedCaptureRow[] = [
   ["GET", "/api/books/2?fields=name", { name: "Second Book" }],
 ];
 
+/** A book as a list asked to expand its shelf shows it. */
+export const expandedBook = (entity: Book): Book => ({
+  ...entity,
+  shelf: { id: 7, name: "Main Hall" },
+});
+
+/** The list read plainly and with its shelves expanded, then a create the plain list shows. */
+export const EXPANDED_LIST_ROWS: readonly TimedCaptureRow[] = [
+  ["GET", "/api/books", [FIRST_BOOK, SECOND_BOOK]],
+  [
+    "GET",
+    "/api/books?expand=shelf",
+    [FIRST_BOOK, SECOND_BOOK].map(expandedBook),
+  ],
+  ["GET", "/api/books/1", FIRST_BOOK],
+  ["GET", "/api/books/2", SECOND_BOOK],
+  ["POST", "/api/books", THIRD_BOOK_AT_4, 201, { name: "Third Book" }],
+  ["GET", "/api/books", [FIRST_BOOK, SECOND_BOOK, THIRD_BOOK_AT_4]],
+];
+
 /** A book numbered as an asset, in digit groups. */
 export const assetBook = (entity: Book, asset: string): Book => ({
   ...entity,

@@ -592,9 +592,14 @@ collection path: an item view's latest values win over a list view's, a view
 whose latest values differ keeps them in `view_fields`, and a field whose value
 changed between one tool's observations with no recorded write between is named
 in the type's `volatile_fields`, keeping the latest value. A value that changed
-across a write under another root may be that write's effect, so every tool of
-its type is a recorded view with reason `fields-differ`; so is a value one tool
-read before a write and another tool read after it. Repeated reads of one full request line also keep the type recorded when list membership changes across a write, including transitions to or from an empty list, or when entity fields are added or removed. Different query strings remain distinct request lines. Sparse responses do not erase the last observation of a field supplied by another request line. Entities are ordered
+across a write under another root may be that write's effect, so the type's
+initial reads end at the earliest write within the change, reads that overlap
+it are left out, and the state is extracted again once; the same holds for a
+value one tool read before a write and another tool read after it, and for
+repeated reads of one full request line whose list membership changes across a
+write, including transitions to or from an empty list, or whose entity fields
+are added or removed. A type whose reads still disagree keeps every tool a
+recorded view with reason `fields-differ`. Different query strings remain distinct request lines. Sparse responses do not erase the last observation of a field supplied by another request line. Entities are ordered
 by type, collection and first sighting; that order is a list's state order.
 Every entity cites its `record_ordinals`.
 
@@ -610,9 +615,16 @@ Every entity cites its `record_ordinals`.
 An item or list plan is kept only when it reproduces the latest initial
 recording of each request line from the state, comparing JSON values without
 regard to member order; a volatile field compares its recorded value. Each
-plan lists the `checked_record_ordinals`. Otherwise the tool is a recorded view
+plan lists the `checked_record_ordinals`. A request line that shows the
+entities in another representation (an expanding or reducing query, or one
+asking for some fields only) is left out of those checks when a query key tells
+it from the others: the plan lists its latest recordings in
+`projected_record_ordinals` and the keys in `projected_query_keys` (`name`,
+with a `value` or `absent: true`), and serving replays calls matching them and
+calls asking for fields the checked lines do not show.
+Otherwise the tool is a recorded view
 with reason `envelope-varies`, `fields-differ` or `list-differs`; the other
-reasons are `query-body` (a query `POST`), `no-init-recording`,
+reasons are `query-body` (a query `POST`, or one the capture shows only reading), `no-init-recording`,
 `body-unusable`, `no-identity` (an item read without a proved identity),
 `path-varies` (another read under more than one path, as a template with a
 parameter before its end), `query-varies` (another read of one path under

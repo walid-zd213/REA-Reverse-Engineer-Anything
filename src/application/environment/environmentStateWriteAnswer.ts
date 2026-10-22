@@ -15,6 +15,10 @@ import {
 } from "../../domain/analysisView/environmentStateWriteExplain.js";
 import { callRenewal } from "../../domain/analysisView/environmentStateWriteGenerated.js";
 import {
+  linkedCollection,
+  sameLinkedSource,
+} from "../../domain/analysisView/environmentStateWriteLinks.js";
+import {
   pathValuesOf,
   type GeneratedRule,
   type StateWritePlan,
@@ -275,6 +279,33 @@ const writeAnswer = (
   return stateAnswer(serving, { exchange, exact }, body.value ?? null, state);
 };
 
+/** The collection a create writes into: a linked plan's, only for its exemplar's path arguments, else the one the call's path selects. */
+const writtenCollection = (
+  serving: StateServing,
+  request: WriteRequest,
+  call: WriteCall,
+): Result<string | undefined, AnalysisError> => {
+  const { tool, plan } = request;
+  const linked = linkedCollection(plan, tool.path_template);
+  if (linked === undefined)
+    return ok(
+      createdCollection(serving, tool, request.args, plan.target ?? ""),
+    );
+  const exemplar =
+    plan.exemplar_ordinal === null
+      ? undefined
+      : serving.source.exchanges.get(plan.exemplar_ordinal);
+  // No read showed where other path arguments create.
+  return sameLinkedSource(tool.path_template, exemplar?.path, call.pathValues)
+    ? ok(linked)
+    : err(
+        refused(
+          tool,
+          `Tool ${tool.name} creates into ${linked} only with the path arguments its recording sent.`,
+        ),
+      );
+};
+
 const answerCreate = (
   serving: StateServing,
   request: WriteRequest,
@@ -283,12 +314,9 @@ const answerCreate = (
   const { tool, plan } = request;
   const type = plan.target ?? "";
   const idField = serving.store.type(type)?.id_field ?? "";
-  const collection = createdCollection(
-    serving,
-    request.tool,
-    request.args,
-    plan.target ?? "",
-  );
+  const target = writtenCollection(serving, request, call);
+  if (!target.ok) return target;
+  const collection = target.value;
   const observed = observedEntity(serving, plan);
   if (collection === undefined || observed === undefined)
     return err(

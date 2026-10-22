@@ -12,6 +12,8 @@ import {
   type StateType,
   type StateView,
 } from "./environmentStateRules.js";
+import { UnseenEntities } from "./environmentStateWriteAdoption.js";
+import { linkedTarget } from "./environmentStateWriteLinks.js";
 import { updatedEntity } from "./environmentStateWriteApply.js";
 import { projectedRead } from "./environmentStateWriteObserve.js";
 import { OmittedFields } from "./environmentStateWriteOmitted.js";
@@ -54,6 +56,7 @@ import { applyDocument } from "./environmentStateWriteDocument.js";
 import {
   applyDelete,
   applyUpdate,
+  built,
   type EffectContext,
   type EffectResult,
   type WriteDraft,
@@ -116,10 +119,18 @@ export class EnvironmentStateWriteSimulation {
   readonly #inserted = new Map<string, string>();
   /** Creates whose insert rule a passing list check relied on, so it is no longer changed. */
   readonly #placed = new Set<string>();
+  /** Entities writes no plan models made, taken when an item read first shows them. */
+  readonly #unseen: UnseenEntities;
 
   constructor(input: WriteSimulationInput) {
     this.#input = input;
     this.#state = new SimulatedState(input.entities, input.documents);
+    this.#unseen = new UnseenEntities(input.entities, {
+      state: this.#state,
+      io: input.io,
+      lastCheck: this.#lastCheck,
+      idField: (type) => this.#types.get(type)?.id_field,
+    });
     for (const type of input.types)
       this.#types.set(type.collection_template, type);
     for (const tool of input.tools)
@@ -143,8 +154,17 @@ export class EnvironmentStateWriteSimulation {
         documents.set(normalizedPath(tool.path_template), tool.name);
     const types = new Set(this.#types.keys());
     for (const tool of this.#input.tools) {
-      if (!changesState(tool.method, tool.path_template)) continue;
-      const { effect, target } = classifyWrite(tool, types, documents);
+      if (
+        !changesState(tool.method, tool.path_template) ||
+        this.#input.readOnly.has(tool.name)
+      )
+        continue;
+      const link = linkedTarget(tool, classifyWrite(tool, types, documents), {
+        ...this.#input,
+        viewOf: (ordinal) =>
+          this.#input.views.get(this.#toolOf.get(ordinal)?.name ?? ""),
+      });
+      const { effect, target } = link;
       this.#input.io.retain(512);
       this.#drafts.set(tool.name, {
         plan: {
@@ -159,6 +179,7 @@ export class EnvironmentStateWriteSimulation {
         calls: 0,
         updates: [],
         sequences: new Map(),
+        linked: link.collection,
       });
     }
     this.#input.records.forEach((record, index) => this.#step(record, index));
@@ -170,14 +191,23 @@ export class EnvironmentStateWriteSimulation {
   #step(record: StateRecordFacts, index: number): void {
     const tool = this.#toolOf.get(record.ordinal);
     // A redirected or unanswered write may have changed state, but only a 2xx one shows its effect.
-    if (isStateWrite(record) && !succeeded(record))
+    if (this.#isWrite(record) && !succeeded(record))
       this.#unmodelled(record.path, index);
-    else if (isStateWrite(record)) this.#write(record, index, tool);
+    else if (this.#isWrite(record)) this.#write(record, index, tool);
     else if (tool?.method === "GET") this.#read(record, index, tool);
+  }
+
+  /** Whether a record may change state: a state write whose tool the capture does not show reading only. */
+  #isWrite(record: StateRecordFacts): boolean {
+    return (
+      isStateWrite(record) &&
+      !this.#input.readOnly.has(this.#toolOf.get(record.ordinal)?.name ?? "")
+    );
   }
 
   #context(writer: string): EffectContext {
     return {
+      isWrite: (record) => this.#isWrite(record),
       state: this.#state,
       io: this.#input.io,
       records: this.#input.records,
@@ -217,12 +247,20 @@ export class EnvironmentStateWriteSimulation {
       effect === "none"
     ) {
       this.#unmodelled(record.path, index);
+      this.#unseen.unplanned(index);
       return;
     }
     const observeOnly = draft.plan.reason !== null;
     if (!observeOnly) draft.calls += 1;
     const step: WriteStep = { record, index, tool, observeOnly };
-    this.#settle(APPLY[effect](this.#context(tool.name), draft, step), {
+    const result = APPLY[effect](this.#context(tool.name), draft, step);
+    // A call of a tool whose plan was never built, or one a linked plan does not place, is no more modelled than one of a tool without a plan.
+    if (
+      result.kind === "unknown" &&
+      (!built(draft) || draft.linked !== undefined)
+    )
+      this.#unseen.unplanned(index);
+    this.#settle(result, {
       index,
       tool: tool.name,
       path: record.path,
@@ -244,12 +282,11 @@ export class EnvironmentStateWriteSimulation {
       this.#unmodelled(write.path, write.index);
       return;
     }
-    if (result.entity !== undefined)
-      this.#taint.known(
-        result.entity.type,
-        result.entity.collection,
-        result.entity.id,
-      );
+    if (result.entity !== undefined) {
+      this.#unseen.touched(result.entity);
+      const { type, collection, id } = result.entity;
+      this.#taint.known(type, collection, id);
+    }
     if (result.kind === "observed") {
       this.#effects.observed(this.#touched, result.targets);
       // A recorded outcome replaces the entity's values, not its collection's membership.
@@ -289,9 +326,14 @@ export class EnvironmentStateWriteSimulation {
       this.#state.put(updatedEntity(entity, { ...entity.fields, ...object }));
   }
 
-  /** Whether an item read is of an entity left unknown that it shows again rather than checks. */
-  #resynced(view: StateView, record: StateRecordFacts): boolean {
+  /** Whether an item read shows an entity an unmodelled write made, or one left unknown, again rather than checks it. */
+  #resynced(view: StateView, record: StateRecordFacts, index: number): boolean {
     if (view.shape !== "item") return false;
+    const adopted = this.#unseen.adopt(view, { record, index });
+    if (adopted !== undefined) {
+      this.#taint.known(adopted.type, adopted.collection, adopted.id);
+      return true;
+    }
     const { collection, id } = itemTarget(this.#state, view.type, record);
     if (!this.#taint.unknown(view.type, collection, id)) return false;
     // A read begun while a modelled write to the entity still ran may show either state, so it neither checks nor shows it.
@@ -370,7 +412,7 @@ export class EnvironmentStateWriteSimulation {
     const view = this.omitted.view(original);
     if (projectedRead(view, record, this.#input.io)) return;
     const borrowers = this.#observations.get(record.ordinal);
-    if (!borrowers && this.#resynced(view, record)) return;
+    if (!borrowers && this.#resynced(view, record, index)) return;
     let outcome = this.#check(view, record);
     if (outcome === undefined) return;
     let keys = [...outcome.targets, ...outcome.unheld];

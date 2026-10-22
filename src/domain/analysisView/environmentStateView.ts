@@ -119,6 +119,26 @@ const entityViewFields = {
       "How the view spells clock fields it always spells otherwise than the entities' stored values; a stored value the view never recorded is spelled this way.",
     ),
 };
+const replayedReadFields = {
+  projected_record_ordinals: z
+    .array(z.number().int().nonnegative())
+    .optional()
+    .describe(
+      "Recorded reads left to replay: they asked for some fields only (`fields`, `select`), or show the entities in another representation than the checked lines (an augmenting or reducing query). Replayed calls do not show served writes.",
+    ),
+  projected_query_keys: z
+    .array(
+      z.strictObject({
+        name: z.string(),
+        value: z.string().optional(),
+        absent: z.literal(true).optional(),
+      }),
+    )
+    .optional()
+    .describe(
+      "Query keys that pick calls of the replayed reads out: a parameter only they name, a value only they give a parameter, or (absent) a parameter every checked line names and they leave out. A call matching any key replays; a projection parameter's value is tested on its own: a call replays unless every value it gives is `*` or one a checked line gave, and no replayed read gave it.",
+    ),
+};
 const viewSchema = z.discriminatedUnion("shape", [
   z.strictObject({
     ...entityViewFields,
@@ -130,12 +150,7 @@ const viewSchema = z.discriminatedUnion("shape", [
       .describe(
         "Record whose response, with the entity object replaced, every item response shares.",
       ),
-    projected_record_ordinals: z
-      .array(z.number().int().nonnegative())
-      .optional()
-      .describe(
-        "Recorded reads that asked for some fields only (`fields`, `select`) and did not return the item; calls naming a projection replay.",
-      ),
+    ...replayedReadFields,
   }),
   z.strictObject({
     ...entityViewFields,
@@ -159,6 +174,7 @@ const viewSchema = z.discriminatedUnion("shape", [
       .describe(
         "How the view's other checked lines select and order entities, when filters, a search, a sort or paging explain them; absent when none does.",
       ),
+    ...replayedReadFields,
   }),
   z.strictObject({
     tool: z.string(),

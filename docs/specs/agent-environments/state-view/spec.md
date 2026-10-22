@@ -25,16 +25,41 @@ later increments.
   any start time is missing, and say which. Bound each type's state by the first
   write under its root (API base, version segments, one segment); a query
   `POST` is not a write, a read overlapping the write is left out, and a write
-  whose URL was redacted bounds every type, with a limitation counting it.
+  whose URL was redacted bounds every type, with a limitation counting it. A
+  successful `POST` elsewhere bounds a type's state too when its response named
+  an id (an identity member, or a bare or sole scalar of four characters or
+  more) that the type's reads show only after it: the `POST` made that entity,
+  so it is not in the initial state. An id shorter than four characters counts
+  only when the type was read before the `POST` and an item read names it after.
 - Prove an item type's identity field from the requested path value its
   responses repeat; otherwise infer it from a fixed list of identity names that
   every listed item carries distinctly, which needs at least one listed item.
   An item read that asked for some fields only (`fields`, `fields[...]`,
   `select`, `$select`) and does not return the item is left out of the proof
-  and of the view's checks; the view lists it in `projected_record_ordinals`,
-  and serving replays any call to that tool that names a projection parameter
-  for an entity the state holds. The write gate also leaves out any read that
-  names one and leaves out a field its view requires.
+  and of the view's checks; the view lists it in `projected_record_ordinals`.
+  Beside a line showing whole entities, a list line asking for some fields only
+  is listed there too, and proves no identity or membership. On a view with
+  such replayed reads, serving replays a call naming a projection parameter for
+  an entity the state holds unless every value it gives is `*` or one a checked
+  line gave, and no replayed read gave it. The write gate also leaves out any
+  read that names one and leaves out a field its view requires.
+- A request line of an item or list view is a representation variant when it
+  shows an entity another line shows with other members, or names a parameter
+  the base lines do not (paging aside) while its objects carry a member no base
+  object carries or lack one every base object carries. Base lines are taken
+  first: lines naming no such parameter, then lines asking for every field,
+  then the line most others agree with. A variant leaves the view's checks, the
+  entity observations and the membership changes that would end the type's
+  initial reads when a query key tells it apart: a parameter only
+  variants name, a value no base line gives a parameter, or a parameter every
+  base line names that a variant leaves out. The view lists its latest
+  recordings in `projected_record_ordinals` and the keys in
+  `projected_query_keys`; serving replays a call matching a key with the reason
+  `variant` (`projection` when it leaves out a projection parameter every base
+  line names; a projection value is tested as above), so the
+  answer is a recording and shows no served write. The write gate neither
+  checks nor learns from a successful read matching a key; a 400, 404 or 410
+  such a read answers is still the absence it checks.
 - A field every recording of a view carried is required: serving refuses an
   entity lacking it. Once a successful read the write gate checks, naming no
   projection parameter, shows the application leaves the field out of an entity
@@ -45,8 +70,9 @@ later increments.
   latest values win over list views', differing views keep their own values,
   and a value that changed between repeats of one request line with no recorded
   write is volatile and keeps the latest; a change across a write under another
-  root, including between two tools of the type, leaves every tool of the type
-  recorded. Compare list membership, including empty lists, and field presence before selecting each request line's latest recording; a change across a write also leaves the type recorded. Different query strings remain distinct; omitted fields do not erase their earlier observations on other request lines.
+  root, including between two tools of the type, ends the type's initial reads
+  at the earliest write within the change, and the state is extracted again
+  once; a type whose reads still disagree keeps every tool recorded. Compare list membership, including empty lists, and field presence before selecting each request line's latest recording; a change across a write ends the type's initial reads the same way. Different query strings remain distinct; omitted fields do not erase their earlier observations on other request lines.
 - An item or list view whose recordings always spell a clock field's instant
   otherwise than the entity's stored value (`Z` against `+00:00`, another
   separator or fraction width) names that spelling in `clock_formats`; a field

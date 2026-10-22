@@ -14,7 +14,9 @@ import {
   scalarText,
   type JsonObject,
   type RecordedViewReason,
+  type ReplayKey,
   type StateEntity,
+  type StateItemView,
   type StateRecordFacts,
   type StateToolFacts,
   type StateView,
@@ -43,9 +45,24 @@ export interface StatePlan {
   readonly recordings: readonly StateRecordFacts[];
   /** The latest of them per request line, in timeline order. */
   readonly latest: readonly StateRecordFacts[];
-  /** Item reads left to replay because they asked for some fields only. */
+  /** Reads left to replay: item reads that asked for some fields only, and representation variants. */
   readonly projected?: readonly number[];
+  /** The query keys that pick calls of the replayed reads out. */
+  readonly projectedKeys?: readonly ReplayKey[];
 }
+
+/** A view's replayed reads and their keys, when it has any. */
+const replayedReads = (
+  plan: StatePlan,
+): Pick<StateItemView, "projected_record_ordinals" | "projected_query_keys"> =>
+  plan.projected === undefined || plan.projected.length === 0
+    ? {}
+    : {
+        projected_record_ordinals: [...plan.projected],
+        ...(plan.projectedKeys === undefined || plan.projectedKeys.length === 0
+          ? {}
+          : { projected_query_keys: [...plan.projectedKeys] }),
+      };
 
 /** What the gate reads from an extraction; `withBody` drops each body's temporary work after `use`. */
 export interface StateGateContext {
@@ -256,9 +273,7 @@ export const checkItemPlan = (
     required_fields: union.required,
     envelope_ordinal: plan.latest[0]!.ordinal,
     checked_record_ordinals: plan.latest.map((record) => record.ordinal),
-    ...(plan.projected === undefined || plan.projected.length === 0
-      ? {}
-      : { projected_record_ordinals: [...plan.projected] }),
+    ...replayedReads(plan),
     ...spellings.view,
   };
 };
@@ -550,6 +565,7 @@ export const checkListPlan = (
     counters,
     ...(query === undefined ? {} : { query }),
     checked_record_ordinals: plan.latest.map((record) => record.ordinal),
+    ...replayedReads(plan),
     ...spellings.view,
   };
 };

@@ -107,12 +107,26 @@ interface EntityViewPlan {
   readonly clock_formats?: Readonly<Record<string, ClockFormat>> | undefined;
 }
 
-export type StateItemView = EntityViewPlan & {
-  readonly shape: "item";
-  readonly envelope_ordinal: number;
-  /** Recorded reads that asked for some fields only and did not return the item, which replay answers. */
+/** A query key that picks out replayed reads: a parameter, a parameter with one value, or a parameter left out. */
+export interface ReplayKey {
+  readonly name: string;
+  readonly value?: string | undefined;
+  readonly absent?: true | undefined;
+}
+
+/** Recorded reads a view leaves to replay, and the query keys that pick calls of them out. */
+interface ReplayedReads {
+  /** Reads that asked for some fields only, or show entities in another representation than the checked lines. */
   readonly projected_record_ordinals?: number[] | undefined;
-};
+  /** A call whose query matches one of these replays, a field selection by its values; absent on views that only left out projections. */
+  readonly projected_query_keys?: ReplayKey[] | undefined;
+}
+
+export type StateItemView = EntityViewPlan &
+  ReplayedReads & {
+    readonly shape: "item";
+    readonly envelope_ordinal: number;
+  };
 
 /** A query parameter that asks for some fields only (`fields`, `fields[...]`, `select`, `$select`). */
 export const isProjectionParameter = (name: string): boolean => {
@@ -130,15 +144,16 @@ export const projectsFields = (query: string | undefined): boolean =>
   query !== undefined &&
   [...new URLSearchParams(query).keys()].some(isProjectionParameter);
 
-export type StateListView = EntityViewPlan & {
-  readonly shape: "list";
-  readonly membership: "all" | "recorded";
-  /** With recorded membership, the checked lines that each list their whole collection. */
-  readonly all_record_ordinals?: number[] | undefined;
-  readonly counters: string[];
-  /** The query the view's other lines follow, when one explains any of them. */
-  readonly query?: ListQuery | undefined;
-};
+export type StateListView = EntityViewPlan &
+  ReplayedReads & {
+    readonly shape: "list";
+    readonly membership: "all" | "recorded";
+    /** With recorded membership, the checked lines that each list their whole collection. */
+    readonly all_record_ordinals?: number[] | undefined;
+    readonly counters: string[];
+    /** The query the view's other lines follow, when one explains any of them. */
+    readonly query?: ListQuery | undefined;
+  };
 
 /** Whether a list view answers on a checked line with every entity of the collection. */
 export const listsAll = (view: StateListView, ordinal: number): boolean =>
@@ -177,7 +192,7 @@ export interface ExtractedState {
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 /** A POST whose path names one of these segments queries state rather than changing it. */
-const QUERY_SEGMENTS = new Set([
+export const QUERY_SEGMENTS = new Set([
   "search",
   "query",
   "list",

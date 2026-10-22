@@ -550,16 +550,45 @@ const mergeRoles = (
   return Object.fromEntries(merged);
 };
 
+/** Whether a filtered field is named like its parameter, an id suffix aside: `category`, `site_id` for `site`. */
+const namedLike = (field: string, name: string): boolean => {
+  const [left, right] = [normalized(field), normalized(name)];
+  return left === right || right === `${left}id` || left === `${right}id`;
+};
+
+/** The roles less any filter on a field named unlike its parameter that only one recorded value supports, since one line can match by coincidence. */
+const trustedRoles = (
+  parameters: Record<string, QueryParameter>,
+  explained: readonly {
+    readonly line: QueryLine;
+    readonly parameters: Record<string, QueryParameter>;
+  }[],
+): Record<string, QueryParameter> =>
+  Object.fromEntries(
+    Object.entries(parameters).filter(([name, role]) => {
+      if (role.role !== "filter" || namedLike(role.field, name)) return true;
+      const values = new Set(
+        explained
+          .filter((entry) => entry.parameters[name]?.role === "filter")
+          .map((entry) => entry.line.values.get(name)),
+      );
+      return values.size >= 2;
+    }),
+  );
+
 /** The query model that lists exactly what each explained line recorded, or undefined when none does. */
 export const learnQuery = (
   lines: readonly QueryLine[],
 ): Pick<ListQuery, "parameters" | "record_ordinals"> | undefined => {
   const explained = lines.flatMap((line) => {
     const parameters = explainLine(line);
-    return parameters === undefined ? [] : [parameters];
+    return parameters === undefined ? [] : [{ line, parameters }];
   });
   if (explained.length === 0) return undefined;
-  const parameters = mergeRoles(explained);
+  const parameters = trustedRoles(
+    mergeRoles(explained.map((entry) => entry.parameters)),
+    explained,
+  );
   const record_ordinals = lines
     .filter((line) => listsAsRecorded(line, parameters))
     .map((line) => line.ordinal);

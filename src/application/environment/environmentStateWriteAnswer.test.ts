@@ -11,6 +11,7 @@ import {
   BOOK_ROWS,
   DELETE_NOT_FOUND,
   DETAILED_LIST_ROWS,
+  EXPANDED_LIST_ROWS,
   FIRST_BOOK,
   OMITTED_FIELD_ROWS,
   PROJECTED_ROWS,
@@ -27,6 +28,7 @@ import {
   book,
   bookClock,
   detailedBook,
+  expandedBook,
   UNCHAPTERED_ROWS,
   VERSIONED_ROWS,
   numberedUuid,
@@ -294,6 +296,19 @@ describe("wider write coverage", () => {
     });
   });
 
+  it("replays a call naming a parameter only the expanded line names, and lists a served create on the plain one", () => {
+    const books = servedFrom(EXPANDED_LIST_ROWS);
+    const created = books.answer("post_books", CREATE_NEW_BOOK).body as Book;
+    expect(books.answer("get_books")).toMatchObject({
+      body: [FIRST_BOOK, SECOND_BOOK, created],
+      state: { source: "state", view: "list" },
+    });
+    expect(books.answer("get_books", { expand: "shelf" })).toMatchObject({
+      body: [FIRST_BOOK, SECOND_BOOK].map(expandedBook),
+      state: { source: "recording", reason: "variant" },
+    });
+  });
+
   it("numbers created books after the largest held asset number, in its digit groups", () => {
     const books = servedFrom(ASSET_ROWS);
     const create = (name: string) =>
@@ -303,6 +318,50 @@ describe("wider write coverage", () => {
     expect(books.answer("get_books_by_id", { id: "1" }).body).toEqual(
       assetBook(FIRST_BOOK, "000-001"),
     );
+  });
+});
+
+describe("field selections beside replayed reads", () => {
+  it("replays a field selection no checked line gave, and answers a selection of every field from the state", () => {
+    const books = servedFrom([
+      ["GET", "/api/books", [FIRST_BOOK, SECOND_BOOK]],
+      ["GET", "/api/books/1?fields=*", FIRST_BOOK],
+      ["GET", "/api/books/2?fields=*", SECOND_BOOK],
+      ["GET", "/api/books/2?fields=name", { name: "Second Book" }],
+    ]);
+    expect(
+      books.answer("get_books_by_id", { id: "1", fields: "id" }),
+    ).toMatchObject({ state: { source: "recording", reason: "projection" } });
+    expect(
+      books.answer("get_books_by_id", { id: "1", fields: "*" }),
+    ).toMatchObject({
+      body: FIRST_BOOK,
+      state: { source: "state", view: "item" },
+    });
+  });
+
+  it("replays a field selection a replayed read gave, beside a variant key and a checked line giving it too", () => {
+    // One read asking for a book's name answered it whole; another left the id out.
+    const books = servedFrom([
+      ["GET", "/api/books", [FIRST_BOOK, SECOND_BOOK]],
+      ["GET", "/api/books/1", FIRST_BOOK],
+      ["GET", "/api/books/1?fields=name", FIRST_BOOK],
+      ["GET", "/api/books/2?fields=name", { name: "Second Book" }],
+      ["GET", "/api/books/1?expand=shelf", expandedBook(FIRST_BOOK)],
+    ]);
+    expect(
+      books.answer("get_books_by_id", { id: "2", fields: "name" }),
+    ).toMatchObject({
+      body: { name: "Second Book" },
+      state: { source: "recording", reason: "projection" },
+    });
+    expect(
+      books.answer("get_books_by_id", { id: "1", expand: "shelf" }),
+    ).toMatchObject({ state: { source: "recording", reason: "variant" } });
+    expect(books.answer("get_books_by_id", { id: "2" })).toMatchObject({
+      body: SECOND_BOOK,
+      state: { source: "state", view: "item" },
+    });
   });
 });
 
@@ -1547,5 +1606,89 @@ describe("asset sequence inference", () => {
     expect(
       books.answer("post_books", { body: { name: "Gamma" } }).body,
     ).toEqual(gamma);
+  });
+});
+
+describe("served catalog of calls that only read", () => {
+  it("serves a lookup POST the capture shows reading only, by replay", () => {
+    const { source, state } = servedFrom([
+      ...BOOK_INIT_ROWS,
+      ["POST", "/api/books/ids", [FIRST_BOOK], 200, { ids: [1] }],
+    ]);
+    const catalog = servedCatalog(source, state, "books");
+    if (!catalog.ok) throw catalog.error;
+    expect(catalog.value.tools.map((tool) => tool.name)).toContain(
+      "post_books_ids",
+    );
+    expect(state.writes.has("post_books_ids")).toBe(false);
+  });
+});
+
+describe("creates read under another path", () => {
+  it("creates into the collection a linked create's returned id was read under", () => {
+    const note = (id: number, title: string) => ({ id, title });
+    const [alpha, beta, gamma] = [
+      note(1001, "Alpha"),
+      note(1002, "Beta"),
+      note(1003, "Gamma"),
+    ];
+    const notes = servedFrom([
+      ["GET", "/api/notes", [alpha, beta]],
+      ["GET", "/api/notes/1001", alpha],
+      ["GET", "/api/notes/1002", beta],
+      ["POST", "/api/drafts/publish", { id: 1003 }, 201, { title: "Gamma" }],
+      ["GET", "/api/notes/1003", gamma],
+      ["GET", "/api/notes", [alpha, beta, gamma]],
+    ]);
+    expect(
+      notes.answer("post_drafts_publish", { body: { title: "Delta" } }),
+    ).toMatchObject({ status: 201 });
+    // The capture's own create is not in the initial state, so the served one takes the next id.
+    const delta = note(1003, "Delta");
+    expect(notes.answer("get_notes_by_id", { id: "1003" }).body).toEqual(delta);
+    expect(notes.answer("get_notes").body).toEqual([alpha, beta, delta]);
+  });
+
+  it("refuses a linked create called with other path arguments than its recording sent", () => {
+    const note = (id: number, title: string) => ({ id, title });
+    const [alpha, beta, gamma] = [
+      note(1001, "Alpha"),
+      note(1002, "Beta"),
+      note(1003, "Gamma"),
+    ];
+    const notes = servedFrom([
+      ["GET", "/api/projects/11/notes", [alpha, beta]],
+      ["GET", "/api/projects/11/notes/1001", alpha],
+      ["GET", "/api/projects/11/notes/1002", beta],
+      [
+        "POST",
+        "/api/projects/11/publish",
+        { id: 1003 },
+        201,
+        { title: "Gamma" },
+      ],
+      ["GET", "/api/projects/11/notes/1003", gamma],
+      ["GET", "/api/projects/11/notes", [alpha, beta, gamma]],
+    ]);
+    const before = notes.snapshot();
+    // No read showed where project 12's publish creates, so it is not put into project 11.
+    expect(
+      notes.refusal("post_projects_publish_by_id", {
+        id: "12",
+        body: { title: "Delta" },
+      }),
+    ).toMatchObject({
+      code: "invalid_request",
+      message: expect.stringContaining(
+        "creates into /api/projects/11/notes only with the path arguments its recording sent",
+      ),
+    });
+    expect(notes.snapshot()).toBe(before);
+    expect(
+      notes.answer("post_projects_publish_by_id", {
+        id: "11",
+        body: { title: "Delta" },
+      }),
+    ).toMatchObject({ status: 201 });
   });
 });

@@ -230,6 +230,18 @@ describe("learning a list's query", () => {
     // Serving supplies a call's values in name order.
     expect(ids("?limit=1&size=2", learned!.parameters)).toEqual(["1"]);
   });
+
+  it("adopts a filter on a field named unlike its parameter only once lines with two values agree on it", () => {
+    const owner = (...lines: QueryLine[]) =>
+      learnQuery(lines)?.parameters["owner"];
+    expect(owner(line("?owner=a", [1, 3], 50))).toBeUndefined();
+    expect(
+      owner(line("?owner=a", [1, 3], 50), line("?owner=b", [2], 51)),
+    ).toEqual({ role: "filter", field: "shelf" });
+    expect(learnQuery([line("?shelf_id=a", [1, 3], 52)])?.parameters).toEqual({
+      shelf_id: { role: "filter", field: "shelf" },
+    });
+  });
 });
 
 describe("queries the state can always answer", () => {

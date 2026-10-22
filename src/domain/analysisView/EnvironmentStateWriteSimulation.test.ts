@@ -25,6 +25,8 @@ import {
   itemTarget,
   SimulatedState,
 } from "./environmentStateWriteChecks.js";
+import { UnseenEntities } from "./environmentStateWriteAdoption.js";
+import type { StateItemView } from "./environmentStateRules.js";
 import {
   laterObservation,
   type ObservationSearch,
@@ -2201,6 +2203,100 @@ describe("volatile fields", () => {
       ["GET", "/api/books/1", seen(1, "Z", "t9")],
     ];
     expect(gated(rows, "patch_books_by_id")).toMatchObject({
+      served: false,
+      checked_record_ordinals: [],
+    });
+  });
+});
+
+describe("entities an unmodelled write made", () => {
+  const IMPORT: TimedCaptureRow = [
+    "POST",
+    "/api/imports",
+    { queued: true },
+    202,
+    { source: "csv" },
+  ];
+  const RENAME: TimedCaptureRow = [
+    "PATCH",
+    "/api/books/1",
+    renamedBook(FIRST_BOOK, "Renamed Book", 3),
+    200,
+    { name: "Renamed Book" },
+  ];
+  const deletedAfterRead = (before: readonly TimedCaptureRow[]) => [
+    ...BOOK_INIT_ROWS,
+    ...before,
+    ["GET", "/api/books/3", THIRD_BOOK] as TimedCaptureRow,
+    ["DELETE", "/api/books/3", "", 204] as TimedCaptureRow,
+    ["GET", "/api/books/3", BOOK_NOT_FOUND, 404] as TimedCaptureRow,
+  ];
+
+  it("serves a delete of a book an unmodelled import made, which a later item read showed", () => {
+    // The rename ends the initial reads, so the third book is no initial one.
+    expect(
+      gated(deletedAfterRead([RENAME, IMPORT]), "delete_books_by_id"),
+    ).toMatchObject({ served: true, checked_record_ordinals: [7] });
+  });
+
+  it("takes a book the state never held only when a write the gate does not model came first", () => {
+    expect(
+      gated(deletedAfterRead([RENAME, IMPORT]), "delete_books_by_id"),
+    ).toMatchObject({ served: true, checked_record_ordinals: [7] });
+    // Only a modelled rename came first, so nothing explains the third book and the delete finds none.
+    expect(
+      gated(deletedAfterRead([RENAME]), "delete_books_by_id"),
+    ).toMatchObject({
+      served: false,
+      checked_record_ordinals: [],
+    });
+  });
+
+  it("counts an entity it takes against the view's allowance", () => {
+    let retained = 0;
+    const read = { ...THIRD_BOOK, notes: "x".repeat(10_000) };
+    const unseen = new UnseenEntities([], {
+      state: new SimulatedState([], []),
+      io: {
+        withBody: (_ordinal, use) => use(read),
+        retain: (bytes) => (retained += bytes),
+      },
+      lastCheck: new Map(),
+      idField: () => "id",
+    });
+    unseen.unplanned(0);
+    retained = 0;
+    const view = { shape: "item", type: "/api/books", pointer: "" };
+    const record = {
+      ordinal: 1,
+      method: "GET",
+      path: "/api/books/3",
+      query: undefined,
+      status: 200,
+      start: 1,
+      end: 1,
+    };
+    expect(
+      unseen.adopt(view as unknown as StateItemView, { record, index: 1 }),
+    ).toMatchObject({ id: "3", fields: read });
+    expect(retained).toBeGreaterThan(20_000);
+  });
+
+  it("takes back no book a modelled delete removed, so a list showing it again confirms no delete", () => {
+    expect(
+      gated(deletedAfterRead([RENAME, IMPORT]), "delete_books_by_id"),
+    ).toMatchObject({ served: true });
+    const rows: TimedCaptureRow[] = [
+      ...BOOK_INIT_ROWS,
+      ["POST", "/api/books", THIRD_BOOK, 201, { name: "Third Book" }],
+      ["GET", "/api/books/3", THIRD_BOOK],
+      ["DELETE", "/api/books/3", "", 204],
+      IMPORT,
+      // The import put the deleted book back; the copy must not take it as one the import made.
+      ["GET", "/api/books/3", THIRD_BOOK],
+      ["GET", "/api/books", [FIRST_BOOK, SECOND_BOOK, THIRD_BOOK]],
+    ];
+    expect(gated(rows, "delete_books_by_id")).toMatchObject({
       served: false,
       checked_record_ordinals: [],
     });

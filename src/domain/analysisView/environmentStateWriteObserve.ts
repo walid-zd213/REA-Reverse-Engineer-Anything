@@ -14,6 +14,7 @@ import {
   type StateRecordFacts,
   type StateView,
 } from "./environmentStateRules.js";
+import { matchesReplayKey, queryValues } from "./environmentStateVariants.js";
 
 /** Where an observed entity object was found: the record and a JSON pointer into its response. */
 export interface Observed {
@@ -94,20 +95,27 @@ export interface ObservationSearch {
   ) => T;
 }
 
-/** Whether a read asked for some fields only and shows no whole entity: an item view replays such reads, or the read leaves out a field its view requires. */
+/** Whether serving replays a read rather than answering it from the state: it matches a replay key, or asked for some fields only and shows no whole entity. */
 export const projectedRead = (
   view: StateView,
   record: StateRecordFacts,
   io: Pick<ObservationSearch, "withBody">,
 ): boolean => {
-  if (
-    (view.shape !== "item" && view.shape !== "list") ||
-    !projectsFields(record.query)
-  )
-    return false;
-  // An absence or error holds no entity, so it is never a partial one.
+  if (view.shape !== "item" && view.shape !== "list") return false;
+  // An absence or error holds no entity, so it is never a partial one and stays evidence.
   if (!succeeded(record)) return false;
-  if (view.shape === "item" && view.projected_record_ordinals !== undefined)
+  const keyed = (view.projected_query_keys ?? []).length > 0;
+  if (
+    keyed &&
+    matchesReplayKey(view.projected_query_keys!, queryValues(record.query))
+  )
+    return true;
+  if (!projectsFields(record.query)) return false;
+  if (
+    view.shape === "item" &&
+    view.projected_record_ordinals !== undefined &&
+    !keyed
+  )
     return true;
   return io.withBody(record.ordinal, (body) => {
     const objects =

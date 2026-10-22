@@ -44,7 +44,9 @@ filter or inert. No two parameters of one call take the same `sort`, `direction`
 depend on which applied last, and serving supplies a call's values in name order rather than as recorded, so such a
 combination explains no line and such a call replays its recording. A line with more than 12 query parameters is left
 unexplained, which bounds the search; names such as `__proto__` are kept as the query's own members. The lines' roles
-merge: lines that disagree drop the parameter, inert values gather, search fields unite. The merged query keeps the
+merge: lines that disagree drop the parameter, inert values gather, search fields unite. A filter on a field not
+named like its parameter (`shelf`, or `shelf_id`, for `shelf`) can match by coincidence, so it stands only when lines
+giving the parameter two different values agree on it; otherwise the parameter takes no role. The merged query keeps the
 lines it reproduces, envelope and fields included; any other line keeps its recorded members. The view's `query` names
 the roles, those lines, and the envelope members that count every match before paging (`totals`); a `number`-of-items
 member such as `numberOfElements` counts the page.
