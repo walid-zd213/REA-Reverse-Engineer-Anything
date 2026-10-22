@@ -41,6 +41,12 @@ export interface BinarySessionOpenOptions {
    */
   readonly loadSnapshot?: AnalysisSnapshotLoader;
   readonly providerId?: AnalysisProviderSelector;
+  /**
+   * Retire a provider client created by a cancelled open the way process
+   * shutdown closes the session: keep provider documents, such as an external
+   * Hopper GUI document, open.
+   */
+  readonly retainProviderDocumentsOnCancel?: boolean;
 }
 
 interface CurrentOpenBinding {

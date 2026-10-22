@@ -45,13 +45,14 @@ it("keeps shutdown output stable while logging the rejected cause at debug level
   };
   const logger = pino({ level: "debug" }, { write: (line) => logs.push(line) });
   createShutdown({
+    session: createManagedBinarySession(),
+    dependencies,
+    serverLogger: logger,
+  }).attachTransport({
     handle,
     closeAndroid: async () => {
       androidClosed = true;
     },
-    session: createManagedBinarySession(),
-    dependencies,
-    serverLogger: logger,
   });
 
   requests[0]?.();
@@ -104,11 +105,10 @@ it("reports a typed binary cleanup failure and retains the client for retry", as
     },
   };
   createShutdown({
-    handle: { close: async () => undefined },
     session,
     dependencies,
     serverLogger: pino({ enabled: false }),
-  });
+  }).attachTransport({ handle: { close: async () => undefined } });
   requests[0]?.();
   await new Promise((resolve) => setImmediate(resolve));
   expect(exitCodes).toEqual([1]);
@@ -156,6 +156,14 @@ it("retries only failed cleanup owners after concurrent shutdown requests", asyn
   if (target === undefined) throw new Error("Missing fixture target");
   expect((await session.open(target)).ok).toBe(true);
   const lifecycle = createShutdown({
+    session,
+    dependencies,
+    serverLogger: pino(
+      { level: "debug" },
+      { write: (line) => logs.push(line) },
+    ),
+  });
+  lifecycle.attachTransport({
     handle: {
       close: async () => {
         handleCalls += 1;
@@ -166,12 +174,6 @@ it("retries only failed cleanup owners after concurrent shutdown requests", asyn
       androidCalls += 1;
       if (androidCalls === 1) throw new Error("first Android close failed");
     },
-    session,
-    dependencies,
-    serverLogger: pino(
-      { level: "debug" },
-      { write: (line) => logs.push(line) },
-    ),
   });
 
   const first = lifecycle.shutdown();
@@ -246,6 +248,10 @@ it("retries failed MCP cleanup owners on a repeated signal and unregisters after
   if (target === undefined) throw new Error("Missing fixture target");
   expect((await session.open(target)).ok).toBe(true);
   createShutdown({
+    session,
+    dependencies,
+    serverLogger: pino({ enabled: false }),
+  }).attachTransport({
     handle: {
       close: async () => {
         handleCalls += 1;
@@ -256,9 +262,6 @@ it("retries failed MCP cleanup owners on a repeated signal and unregisters after
       androidCalls += 1;
       if (androidCalls === 1) throw new Error("first Android close failed");
     },
-    session,
-    dependencies,
-    serverLogger: pino({ enabled: false }),
   });
 
   signals.emit("SIGTERM");

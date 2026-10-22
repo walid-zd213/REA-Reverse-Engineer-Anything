@@ -105,6 +105,11 @@ it.each(shutdownEvents)(
       },
     };
     const lifecycle = createShutdown({
+      session,
+      dependencies,
+      serverLogger: pino({ enabled: false }),
+    });
+    lifecycle.attachTransport({
       handle,
       closeAndroid: async () => {
         androidCloseCalls += 1;
@@ -112,9 +117,6 @@ it.each(shutdownEvents)(
       closeOptionalProviders: async () => {
         optionalCloseCalls += 1;
       },
-      session,
-      dependencies,
-      serverLogger: pino({ enabled: false }),
     });
 
     if (event === "SIGINT" || event === "SIGTERM") signals.emit(event);
@@ -166,6 +168,19 @@ it("keeps shared provider owners open when the transport preparation barrier fai
     return closeSession(...args);
   };
   const lifecycle = createShutdown({
+    session,
+    dependencies: {
+      env: {},
+      serve: () => {
+        throw new Error("unused transport");
+      },
+      writeStderr: () => undefined,
+      setExitCode: () => undefined,
+      registerShutdown: () => () => undefined,
+    },
+    serverLogger: pino({ enabled: false }),
+  });
+  lifecycle.attachTransport({
     handle: {
       prepareShutdown: async () => {
         events.push("prepare");
@@ -179,17 +194,6 @@ it("keeps shared provider owners open when the transport preparation barrier fai
     closeOptionalProviders: async () => {
       events.push("provider");
     },
-    session,
-    dependencies: {
-      env: {},
-      serve: () => {
-        throw new Error("unused transport");
-      },
-      writeStderr: () => undefined,
-      setExitCode: () => undefined,
-      registerShutdown: () => () => undefined,
-    },
-    serverLogger: pino({ enabled: false }),
   });
   await expect(lifecycle.shutdown()).rejects.toThrow(
     "tool cleanup is still running",
@@ -239,13 +243,14 @@ it("joins concurrent shutdown events and retries only failed owners", async () =
     },
   };
   createShutdown({
+    session,
+    dependencies,
+    serverLogger: pino({ enabled: false }),
+  }).attachTransport({
     handle,
     closeAndroid: async () => {
       androidCloseCalls += 1;
     },
-    session,
-    dependencies,
-    serverLogger: pino({ enabled: false }),
   });
 
   signals.emit("SIGINT");

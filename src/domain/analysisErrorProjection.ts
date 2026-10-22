@@ -48,6 +48,17 @@ import {
   type AnalysisErrorTag,
 } from "./analysisErrorBase.js";
 
+/**
+ * Whether cancellation caused the failure. The primary error decides, even
+ * when it or a composing error also reports incomplete cleanup, which the
+ * projected `code` would show as `cleanup_incomplete` instead.
+ */
+export const isCancelledAnalysisError = (error: AnalysisError): boolean => {
+  let primary = error;
+  while (primary.cleanupPrimary !== undefined) primary = primary.cleanupPrimary;
+  return underlyingErrorCode(primary) === "cancelled";
+};
+
 /** Project expected failures into exhaustive, secret-safe caller fields. */
 export const projectAnalysisError = (
   error: AnalysisError,

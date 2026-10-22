@@ -49,6 +49,7 @@ import {
 } from "./BinarySessionExecution.js";
 import { closeAnalysisClient } from "../../providers/AnalysisClientCleanup.js";
 import { analysisErrorWithCleanupFailure } from "../../domain/analysisErrorCleanup.js";
+import { isCancelledAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { profilelessNativeDispatchProfile } from "./ProfilelessNativeWorkflowSnapshot.js";
 import type { AnalysisSnapshot } from "../../domain/analysisSnapshot.js";
@@ -528,7 +529,10 @@ export class BinarySession
   async #openWithinTransition(
     admittedThrough: number,
     resolve: () => Promise<Result<ResolvedSessionOpen, AnalysisError>>,
-    options: Pick<BinarySessionOpenOptions, "signal" | "snapshot">,
+    options: Pick<
+      BinarySessionOpenOptions,
+      "signal" | "snapshot" | "retainProviderDocumentsOnCancel"
+    >,
   ): Promise<Result<BinaryTarget, AnalysisError>> {
     if (this.#externalMutationCleanupFailure?.cleanupIncomplete === true)
       return err(this.#externalMutationCleanupFailure);
@@ -618,7 +622,7 @@ export class BinarySession
     const run: SessionRun = { client, route, runId };
     const started = await client.execute("health", {}, options);
     if (!started.ok) {
-      return err(await this.#failedOpen(run, previous, started.error));
+      return err(await this.#failedOpen(run, previous, started.error, options));
     }
     if (isAborted(options.signal)) {
       return err(
@@ -628,6 +632,7 @@ export class BinarySession
           new AnalysisCancelledError("open_binary", {
             cause: options.signal?.reason,
           }),
+          options,
         ),
       );
     }
@@ -641,12 +646,10 @@ export class BinarySession
       );
       if (!retiredResources.ok) {
         const primary = cleanupFailures.error ?? retiredResources.error;
-        const failed = await this.#failedOpen(
-          run,
-          previous,
-          primary,
-          cleanupFailures.onFailure,
-        );
+        const failed = await this.#failedOpen(run, previous, primary, {
+          ...options,
+          onCleanupFailure: cleanupFailures.onFailure,
+        });
         return err(cleanupFailures.error ?? failed);
       }
     }
@@ -654,12 +657,10 @@ export class BinarySession
       const cancelled = new AnalysisCancelledError("open_binary", {
         cause: options.signal?.reason,
       });
-      const failed = await this.#failedOpen(
-        run,
-        previous,
-        cancelled,
-        cleanupFailures.onFailure,
-      );
+      const failed = await this.#failedOpen(run, previous, cancelled, {
+        ...options,
+        onCleanupFailure: cleanupFailures.onFailure,
+      });
       return err(cleanupFailures.error ?? failed);
     }
     const profilelessWorkflowProfile =
@@ -940,12 +941,24 @@ export class BinarySession
     run: SessionRun,
     previous: SessionBinding | undefined,
     primary: AnalysisError,
-    onCleanupFailure?: (failure: AnalysisError) => void,
+    options: Pick<
+      BinarySessionOpenOptions,
+      "signal" | "retainProviderDocumentsOnCancel"
+    > & {
+      readonly onCleanupFailure?: (failure: AnalysisError) => void;
+    } = {},
   ): Promise<AnalysisError> {
-    const closed = await this.#retireClient(
-      run,
-      onCleanupFailure === undefined ? {} : { onCleanupFailure },
-    );
+    const { onCleanupFailure } = options;
+    // Retain documents only when the open failed because it was cancelled; a
+    // provider failure that races the signal still closes what it launched.
+    const cancelled =
+      isAborted(options.signal) && isCancelledAnalysisError(primary);
+    const closed = await this.#retireClient(run, {
+      ...(cancelled && options.retainProviderDocumentsOnCancel === true
+        ? { retainDocument: true }
+        : {}),
+      ...(onCleanupFailure === undefined ? {} : { onCleanupFailure }),
+    });
     if (!closed.ok)
       return analysisErrorWithCleanupFailure(
         primary,

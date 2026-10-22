@@ -32,5 +32,6 @@ export interface RuntimeDependencies {
   readonly setExitCode: (code: number) => void;
   readonly registerShutdown: (handler: () => void) => () => void;
   readonly createServer?: typeof import("../server/createServer.js").createServer;
+  readonly createSession?: typeof import("../composition/binary.js").createBinarySession;
   readonly loadOptionalProviders?: () => Promise<OptionalProviderLoadResult>;
 }

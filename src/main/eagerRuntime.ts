@@ -36,35 +36,59 @@ export const runEager = async (
   }
   const logger = createLogger("mcp", config.value.logLevel);
   const serverLogger = logger.child({ layer: "server" });
-  const session = createBinarySession(config.value, logger, environment);
-  const opened = await openInitialTarget(
-    session,
+  const session = (dependencies.createSession ?? createBinarySession)(
     config.value,
-    serverLogger,
-    dependencies.writeStderr,
-  );
-  if (!opened.ok) return opened.exitCode;
-  const transport = await startMcpTransport(dependencies, session, {
     logger,
-    serverLogger,
     environment,
-    delivery: createToolResultDelivery(config.value.mcpMaxResponseBytes),
-    loadOptionalProviders:
-      dependencies.loadOptionalProviders ??
-      (() =>
-        loadOptionalObservationProviders(
-          createOptionalObservationFactories(environment),
-        )),
-  });
-  if (!transport.ok) return 1;
-  const shutdown = createShutdown({
-    handle: transport.handle,
-    closeAndroid: transport.closeAndroid,
-    closeOptionalProviders: transport.closeOptionalProviders,
-    session,
-    dependencies,
-    serverLogger,
-  });
-  dependencies.captureShutdown?.(shutdown.shutdown);
-  return 0;
+  );
+  // Handle signals before the initial open: provider children run detached,
+  // so default signal termination would leave them behind. On stdio, stdin
+  // EOF is seen only once the transport reads stdin, after startup.
+  const lifecycle = createShutdown({ session, dependencies, serverLogger });
+  try {
+    const opened = await lifecycle.whileOpening(() =>
+      openInitialTarget(session, config.value, {
+        serverLogger,
+        writeStderr: dependencies.writeStderr,
+        signal: lifecycle.signal,
+      }),
+    );
+    if (!opened.ok) {
+      if ("cancelled" in opened) return lifecycle.finish();
+      if (opened.cleanupPending) await lifecycle.finishFailedOpen();
+      else await lifecycle.release();
+      return opened.exitCode;
+    }
+    if (lifecycle.signal.aborted) return lifecycle.finish();
+    const transport = await startMcpTransport(dependencies, session, {
+      logger,
+      serverLogger,
+      environment,
+      delivery: createToolResultDelivery(config.value.mcpMaxResponseBytes),
+      loadOptionalProviders:
+        dependencies.loadOptionalProviders ??
+        (() =>
+          loadOptionalObservationProviders(
+            createOptionalObservationFactories(environment),
+          )),
+      signal: lifecycle.signal,
+    });
+    if (!transport.ok) {
+      if ("cancelled" in transport) {
+        lifecycle.attachTransport(transport);
+        return lifecycle.finish();
+      }
+      await lifecycle.release();
+      return 1;
+    }
+    lifecycle.attachTransport(transport);
+    if (lifecycle.signal.aborted) return lifecycle.finish();
+    // A deferred runtime owns process events and closes through this owner.
+    dependencies.captureShutdown?.(lifecycle.shutdown);
+    return 0;
+  } catch (cause: unknown) {
+    // An unexpected startup failure still closes what startup acquired.
+    await lifecycle.finish();
+    throw cause;
+  }
 };
