@@ -199,7 +199,7 @@ and the Code chunk header. Missing optional tables stay null. See
 [Erlang BEAM files](erlang-beam.md).
 
 Configure [Hopper or Ghidra](installation.md#hopper), the
-[IDA adapter](ida-provider.md), or [Kuna](kuna-provider.md) before analyzing a
+[IDA adapter](ida-provider.md), [Binary Ninja](binary-ninja.md), or [Kuna](kuna-provider.md) before analyzing a
 native target. Substitute
 your target, search text and function name or address in these examples:
 
@@ -257,7 +257,7 @@ The selected provider remains bound to the session until an explicit switch
 or close. Provider failures are returned with their original reason. For an
 `ambiguous` selection error, choose from `details.candidate_ids`; for
 `provider_unavailable`, follow `message`, `remediation.action`, and the original
-reasons in `details.rejections`. For Hopper, Ghidra, IDA, JADX, and Kuna, run
+reasons in `details.rejections`. For Hopper, Ghidra, IDA, Binary Ninja, JADX, and Kuna, run
 `rea doctor --provider ID --json` to diagnose the selected engine. Other adapters,
 such as `pwntools-elf`, report their configuration requirements directly and are
 not accepted by `doctor --provider`. See
