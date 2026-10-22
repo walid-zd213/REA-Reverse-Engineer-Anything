@@ -1400,9 +1400,84 @@ describe("ESM module URL path decoding", () => {
       });
     }
   });
+
+  it.each(["%2f", "%5c"])(
+    "discards an encoded separator segment removed by a later dot segment: %s",
+    (separator) => {
+      expect(
+        resolve({
+          declaredPath: `./bad${separator}/../target.mjs`,
+          sourcePath: "app/esm/entry.mjs",
+          context: "module-specifier",
+          moduleKind: "import",
+          files: fileMap([
+            file("app/esm/entry.mjs", "root"),
+            file("app/esm/target.mjs", "root"),
+          ]),
+        }),
+      ).toMatchObject({
+        resolution_status: "resolved",
+        resolved_path: "app/esm/target.mjs",
+      });
+    },
+  );
+
+  it("uses URL scalar conversion for an unpaired surrogate in an ESM path", () => {
+    expect(
+      resolve({
+        declaredPath: "./x\uD800.mjs",
+        sourcePath: "app/esm/entry.mjs",
+        context: "module-specifier",
+        moduleKind: "import",
+        files: fileMap([
+          file("app/esm/entry.mjs", "root"),
+          file("app/esm/x\uFFFD.mjs", "root"),
+        ]),
+      }),
+    ).toMatchObject({
+      resolution_status: "resolved",
+      resolved_path: "app/esm/x\uFFFD.mjs",
+    });
+  });
+
+  it.each([".//target.mjs", "./a/..//target.mjs"])(
+    "does not turn a relative empty URL segment into an absolute path: %s",
+    (declaredPath) => {
+      expect(
+        resolve({
+          declaredPath,
+          sourcePath: "app/esm/entry.mjs",
+          context: "module-specifier",
+          moduleKind: "import",
+          files: fileMap([
+            file("app/esm/entry.mjs", "root"),
+            file("target.mjs", "root"),
+          ]),
+        }),
+      ).toMatchObject({
+        resolution_status: "unavailable",
+        resolved_path: null,
+      });
+    },
+  );
 });
 
 describe("JavaScript file URL resolution", () => {
+  it("keeps a normalized file URL unavailable without a host mapping", () => {
+    expect(
+      resolve({
+        declaredPath: "file:///bad%2f/../assets/app.js",
+        sourcePath: "main.js",
+        context: "module-specifier",
+        moduleKind: "import",
+        files: fileMap([file("assets/app.js", "root")]),
+      }),
+    ).toMatchObject({
+      resolution_status: "unavailable",
+      resolved_path: null,
+    });
+  });
+
   it("keeps absolute file URL modules unavailable without a host mapping", () => {
     const files = fileMap([file("assets/app.js", "root")]);
     for (const declaredPath of [

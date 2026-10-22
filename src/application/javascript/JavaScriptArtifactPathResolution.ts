@@ -19,6 +19,14 @@ import {
   stripQueryAndFragment,
 } from "../../domain/artifactPathSyntax.js";
 import {
+  applyUrlReference,
+  urlBaseDirectory,
+  urlDirectoryState,
+  urlPathCandidate as canonicalUrlPathCandidate,
+  urlRelativePath,
+  type UrlPathState,
+} from "../../domain/urlPathSegments.js";
+import {
   classifyPackageImportSpecifier,
   classifyPackageImportTargetString,
   lookupExactPackageImport,
@@ -776,78 +784,28 @@ const relativeCandidate = (sourcePath: string, declared: string): string =>
     : posix.join(posix.dirname(sourcePath), declared);
 
 /**
- * A URL path during reference resolution. Above-root `..` markers are kept
- * apart from segments, so a later `..` cannot cancel an escape, while empty
- * segments stay removable until the final path is formed.
- */
-interface UrlPathState {
-  readonly escapes: number;
-  readonly segments: readonly string[];
-}
-
-const urlDirectoryState = (directory: string): UrlPathState => ({
-  escapes: 0,
-  segments: directory === "" || directory === "." ? [] : directory.split("/"),
-});
-
-/**
- * Apply URL dot segments: `..` removes the previous segment even when it is
- * empty, so `assets//../app.js` names `assets/app.js`. A final `.` or `..`
- * leaves directory form, as the URL parser does.
- */
-const applyUrlReference = (
-  base: UrlPathState,
-  reference: string,
-  encodedDotSegments = false,
-): UrlPathState => {
-  const absolute = reference.startsWith("/");
-  const segments = absolute ? [] : [...base.segments];
-  let escapes = absolute ? 0 : base.escapes;
-  const parts = (absolute ? reference.slice(1) : reference).split("/");
-  for (const [index, part] of parts.entries()) {
-    const dot = encodedDotSegments ? part.replace(/%2e/giu, ".") : part;
-    if (dot !== "." && dot !== "..") {
-      segments.push(part);
-      continue;
-    }
-    if (dot === "..")
-      if (segments.length > 0) segments.pop();
-      else escapes += 1;
-    if (index === parts.length - 1) segments.push("");
-  }
-  return { escapes, segments };
-};
-
-/** A relative reference replaces the base URL's final path segment. */
-const urlBaseDirectory = (base: UrlPathState): UrlPathState => ({
-  escapes: base.escapes,
-  segments: base.segments.slice(0, -1),
-});
-
-/**
  * Form the artifact candidate. A remaining empty segment cannot name a
  * canonical artifact file; a trailing one is directory form. Confinement
  * rejects a candidate that keeps an above-root marker.
  */
 const urlPathCandidate = (path: UrlPathState): string | CandidateResolution => {
-  const segments =
-    path.segments.at(-1) === "" ? path.segments.slice(0, -1) : path.segments;
-  if (segments.includes(""))
-    return unresolvedCandidate("unavailable", [
-      "Repeated URL path separators cannot be mapped to an exact canonical artifact file.",
-    ]);
-  return [
-    ...Array.from({ length: path.escapes }, () => ".."),
-    ...segments,
-  ].join("/");
+  const candidate = canonicalUrlPathCandidate(path);
+  return candidate === null ? unavailableUrlPathCandidate() : candidate;
 };
+
+const unavailableUrlPathCandidate = (): CandidateResolution =>
+  unresolvedCandidate("unavailable", [
+    "Repeated URL path separators cannot be mapped to an exact canonical artifact file.",
+  ]);
 
 /** Resolve a URL path reference against a canonical directory. */
 const urlRelativeCandidate = (
   directory: string,
   reference: string,
-): string | CandidateResolution =>
-  urlPathCandidate(applyUrlReference(urlDirectoryState(directory), reference));
+): string | CandidateResolution => {
+  const candidate = urlRelativePath(directory, reference);
+  return candidate === null ? unavailableUrlPathCandidate() : candidate;
+};
 
 const bareModuleCandidate = (
   input: ResolveArtifactPathInput,

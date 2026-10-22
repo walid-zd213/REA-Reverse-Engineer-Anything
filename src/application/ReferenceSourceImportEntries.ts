@@ -3,6 +3,15 @@ import { posix } from "node:path";
 
 import { logicalPathEscapesRoot } from "../domain/artifactIdentity.js";
 import {
+  htmlUrlText,
+  stripQueryAndFragment,
+} from "../domain/artifactPathSyntax.js";
+import {
+  applyUrlReference,
+  urlDirectoryState,
+  urlRelativeFilesystemPath,
+} from "../domain/urlPathSegments.js";
+import {
   createReferenceSourcePathLookup,
   isPortableAbsoluteReferenceTarget,
   type ReferenceSourcePathLookup,
@@ -188,6 +197,37 @@ const nodeRequireIndexCandidates = (directory: string): string[] =>
     posix.join(directory, `index${suffix}`),
   );
 
+/** Normalize ESM URL structure before decoding the retained pathname bytes. */
+const normalizeImportPathname = (specifier: string): string | undefined => {
+  const pathname = stripQueryAndFragment(
+    htmlUrlText(Buffer.from(specifier, "utf8").toString("utf8")),
+  );
+  if (pathname.includes("\\")) return undefined;
+  const state = applyUrlReference(urlDirectoryState(""), pathname, true);
+  // Node checks encoded separators after URL dot segments have removed paths.
+  if (state.segments.some((segment) => /%(?:2f|5c)/iu.test(segment)))
+    return undefined;
+  try {
+    const decoded = state.segments.map((segment) =>
+      decodeURIComponent(segment),
+    );
+    if (decoded.some((segment) => segment.includes("\0"))) return undefined;
+    const normalized = [
+      ...Array.from({ length: state.escapes }, () => ".."),
+      ...decoded,
+    ].join("/");
+    return pathname.startsWith("/")
+      ? `/${normalized}`
+      : normalized === "" && state.segments.at(-1) === ""
+        ? "./"
+        : normalized.startsWith("/")
+          ? `./${normalized}`
+          : normalized;
+  } catch {
+    return undefined;
+  }
+};
+
 /** Inventory facts an internal specifier resolves against. */
 interface SpecifierContext {
   readonly lookupPath: ReferenceSourcePathLookup;
@@ -274,14 +314,20 @@ const resolveInternalSpecifier = (
 ): { to: string; resolution: "internal" | "unresolved" } => {
   if (posix.isAbsolute(specifier))
     return { to: specifier, resolution: "unresolved" };
-  const normalized = posix.normalize(
-    posix.join(posix.dirname(fromPath), specifier),
-  );
+  // TypeScript resolves source specifiers literally, even when emitted JS
+  // would later use URL semantics for the same text.
+  const esmImport = mode === "source-import" && /\.(?:c|m)?js$/u.test(fromPath);
+  const pathname = esmImport ? normalizeImportPathname(specifier) : specifier;
+  if (pathname === undefined)
+    return { to: specifier, resolution: "unresolved" };
+  const normalized = esmImport
+    ? urlRelativeFilesystemPath(posix.dirname(fromPath), pathname)
+    : posix.normalize(posix.join(posix.dirname(fromPath), pathname));
   if (logicalPathEscapesRoot(normalized))
     return { to: normalized, resolution: "unresolved" };
   // Preserve directory intent before normalization removes terminal dot segments.
   const directoryReference =
-    specifier.endsWith("/") || [".", ".."].includes(posix.basename(specifier));
+    pathname.endsWith("/") || [".", ".."].includes(posix.basename(pathname));
   // A directory resolves only to an index with an extension; neither Node nor
   // TypeScript selects an extensionless `index` file.
   const slots = resolutionSuffixes(mode);
