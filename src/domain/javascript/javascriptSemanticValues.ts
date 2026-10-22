@@ -1096,7 +1096,13 @@ const provenanceForBindingInitializers = (
           "A type-only import does not establish a runtime module value.",
         )
       : semanticOriginsProvenance(binding.directOrigins);
-  if (binding.initializers.length === 0) return semanticLocalProvenance();
+  if (binding.initializers.length === 0)
+    return binding.kind === "import" && !binding.runtimeImport
+      ? semanticUnresolvedProvenance(
+          "unknown",
+          "An erased import binding does not establish a runtime value.",
+        )
+      : semanticLocalProvenance();
   if (binding.initializers.length > 1)
     return semanticAmbiguousProvenance(
       [],

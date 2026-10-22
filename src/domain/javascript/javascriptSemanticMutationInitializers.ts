@@ -5,6 +5,7 @@ import {
   semanticComputedMethodKey,
   semanticBranchMayBeSkipped,
   semanticIterationCardinality,
+  semanticPatternInitializationPrecedesRead,
 } from "./javascriptSemanticEvaluationOrder.js";
 
 import {
@@ -119,18 +120,28 @@ const positionPrecedes = (
       left.declaratorIndex >= 0 &&
       left.declaratorIndex < right.declaratorIndex));
 
-/** Order effects only in a non-repeating top-level activation. */
+/** Order effects after a capture only in a non-repeating capture activation. */
 export const semanticTopLevelEffectFollowsCapture = (
   capture: t.Node,
   effect: t.Node | undefined,
   parents: WeakMap<t.Node, t.Node>,
 ): boolean => {
-  const position = (node: t.Node | undefined): StatementPosition | null => {
+  const position = (
+    node: t.Node | undefined,
+    repeatingEffect = false,
+  ): StatementPosition | null => {
     let selected: StatementPosition | null = null;
     let declarator: t.VariableDeclarator | undefined;
     let child: t.Node | undefined;
     while (node !== undefined) {
-      if (t.isFunction(node) || t.isLoop(node)) return null;
+      if (t.isFunction(node)) return null;
+      if (t.isLoop(node)) {
+        if (!repeatingEffect) return null;
+        // A capture outside the loop may precede the entire repeating region.
+        // Captures within it remain unordered across iterations.
+        selected = null;
+        declarator = undefined;
+      }
       if (delayedInstanceFieldValue(node, child)) return null;
       if (t.isVariableDeclarator(node)) declarator = node;
       if (t.isStatement(node)) {
@@ -144,7 +155,7 @@ export const semanticTopLevelEffectFollowsCapture = (
     return null;
   };
   const before = position(capture);
-  const after = position(effect);
+  const after = position(effect, true);
   if (before === null || after === null) return false;
   if (positionPrecedes(before, after)) return true;
   if (
@@ -153,7 +164,14 @@ export const semanticTopLevelEffectFollowsCapture = (
     before.declaratorIndex !== after.declaratorIndex
   )
     return false;
-  return expressionEvaluationOrder(capture, effect, parents) === "before";
+  const patternOrder =
+    effect === undefined
+      ? undefined
+      : semanticPatternInitializationPrecedesRead(capture, effect, parents);
+  return (
+    patternOrder ??
+    expressionEvaluationOrder(capture, effect, parents) === "before"
+  );
 };
 
 /** Include expression order when a write operation contains the read site. */
@@ -724,6 +742,7 @@ export const semanticBindingAtRead = (
     !repeating &&
     origin !== undefined &&
     binding.initializers.length + binding.referenceInitializers.length === 1 &&
+    binding.directOrigins.length === 0 &&
     sourcePosition !== null &&
     position !== null &&
     positionPrecedes(sourcePosition, position)
@@ -774,7 +793,7 @@ const selectInitializers = (
   | {
       readonly binding: Pick<
         JavaScriptSemanticBindingState,
-        "initializers" | "referenceInitializers"
+        "initializers" | "referenceInitializers" | "directOrigins"
       >;
       readonly hasDefiniteInitializer: boolean;
     }
@@ -820,6 +839,7 @@ const selectInitializers = (
   // can then reuse the binding's dependency-aware provenance memo rather than
   // treating every equivalent read as a new temporal snapshot.
   if (
+    !(replacesEntry && binding.directOrigins.length > 0) &&
     binding.initializers.every((initializer) => retained.has(initializer)) &&
     binding.referenceInitializers.every((initializer) =>
       retained.has(initializer),
@@ -829,6 +849,7 @@ const selectInitializers = (
   return {
     hasDefiniteInitializer: replacesEntry,
     binding: {
+      directOrigins: replacesEntry ? [] : binding.directOrigins,
       initializers: binding.initializers.filter((initializer) =>
         retained.has(initializer),
       ),

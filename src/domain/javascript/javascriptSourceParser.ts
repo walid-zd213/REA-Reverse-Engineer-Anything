@@ -89,12 +89,15 @@ const parseWithRuntimeContext = (
  *   `disallowAmbiguousJSXLike`, matching tsc's `.mts` mode.
  * - `decorators-legacy` always present: without it decorated sources fail
  *   hard instead of reporting recovered syntax, losing every derived fact.
+ * - `decoratorAutoAccessors` retains class accessor fields as inert syntax;
+ *   their values follow the same static/instance timing as ordinary fields.
  * - Unknown paths retain the existing JSX- and TypeScript-capable contract
  *   (best-effort parse; failures surface via `errorRecovery`).
  */
 export const parserPluginsForPath = (sourcePath?: string): ParserPlugin[] => {
   const path = sourcePath ?? "";
-  if (/\.(?:js|jsx|mjs|cjs)$/iu.test(path)) return ["decorators-legacy", "jsx"];
+  if (/\.(?:js|jsx|mjs|cjs)$/iu.test(path))
+    return ["decorators-legacy", "decoratorAutoAccessors", "jsx"];
   const dts = /\.d\.(?:ts|mts|cts)$/iu.test(path);
   const isTsLike = /\.(?:ts|cts|mts)$/iu.test(path);
   const isTsx = /\.tsx$/iu.test(path);
@@ -108,8 +111,8 @@ export const parserPluginsForPath = (sourcePath?: string): ParserPlugin[] => {
   ];
   const jsxCapable = !dts && (isTsx || !isTsLike);
   return jsxCapable
-    ? ["decorators-legacy", "jsx", typescript]
-    : ["decorators-legacy", typescript];
+    ? ["decorators-legacy", "decoratorAutoAccessors", "jsx", typescript]
+    : ["decorators-legacy", "decoratorAutoAccessors", typescript];
 };
 
 /** `.mjs` and `.mts` explicitly select module mode. */

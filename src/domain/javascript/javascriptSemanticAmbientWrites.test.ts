@@ -1,9 +1,66 @@
 import { expect, it } from "vitest";
 
 import { analyzeJavaScriptStaticSource } from "./javascriptStaticAnalysis.js";
-import { indexJavaScriptBindingsSteps } from "./javascriptSemanticAnalysis.js";
+import {
+  indexJavaScriptBindingsSteps,
+  indexJavaScriptBindingsWithReceiversSteps,
+} from "./javascriptSemanticAnalysis.js";
 import { completeSemanticSteps } from "./javascriptSemanticTraversal.js";
 import { parseJavaScriptSource } from "./javascriptSourceParser.js";
+
+it("retains opaque escapes in the canonical ordered ambient effect stream", () => {
+  const parsed = parseJavaScriptSource(
+    "const root=globalThis;mutate(root);",
+    "app.cjs",
+  );
+  if (parsed === null) throw new Error("Expected parsed source");
+  const index = completeSemanticSteps(
+    indexJavaScriptBindingsWithReceiversSteps(
+      parsed.program,
+      "commonjs-wrapper",
+    ),
+  );
+  completeSemanticSteps(index.indexAmbientWritesSteps());
+  completeSemanticSteps(index.indexMemberMutationFactsSteps());
+  expect(
+    index.bindings.ambientReferenceEffects.some(
+      (effect) => effect.kind === "escape" && effect.path[0] === "global",
+    ),
+  ).toBe(true);
+});
+
+it("keeps promise constructor and then mutations as distinct producer paths", () => {
+  const parsed = parseJavaScriptSource(
+    'export {};const pending=import("ws");pending.then=()=>{};pending.constructor={};',
+    "app.mjs",
+  );
+  if (parsed === null) throw new Error("Expected parsed source");
+  const index = completeSemanticSteps(
+    indexJavaScriptBindingsWithReceiversSteps(parsed.program),
+  );
+  completeSemanticSteps(index.indexAmbientWritesSteps());
+  completeSemanticSteps(index.indexMemberMutationFactsSteps());
+  const binding = [...index.bindings.bindingsById.values()].find(
+    (binding) => binding.name === "pending",
+  );
+  expect(binding?.memberWrites.map((effect) => effect.path).sort()).toEqual([
+    ["constructor"],
+    ["then"],
+  ]);
+});
+
+it("collects stored callback call sites once during definitions", () => {
+  const parsed = parseJavaScriptSource(
+    "const run=()=>0;run();const alias=run;alias();",
+    "app.js",
+  );
+  if (parsed === null) throw new Error("Expected parsed source");
+  const state = completeSemanticSteps(
+    indexJavaScriptBindingsSteps(parsed.program),
+  );
+  expect(state.callSites).toHaveLength(2);
+  expect(new Set(state.callSites).size).toBe(2);
+});
 
 it("keeps wrapper module aliases distinct from global-object module properties", () => {
   const parsed = parseJavaScriptSource(
@@ -18,7 +75,11 @@ it("keeps wrapper module aliases distinct from global-object module properties",
   const state = completeSemanticSteps(
     indexJavaScriptBindingsSteps(parsed.program),
   );
-  expect(state.ambientWriteEffects.map(({ path }) => path)).toEqual([
+  expect(
+    state.ambientReferenceEffects
+      .filter(({ kind }) => kind === "write")
+      .map(({ path }) => path),
+  ).toEqual([
     ["commonjs-module", "exports"],
     ["global", "module", "exports"],
   ]);
@@ -40,8 +101,9 @@ it.each([
       indexJavaScriptBindingsSteps(parsed.program),
     );
     expect(
-      state.ambientEscapeEffects.some(
-        ({ path }) =>
+      state.ambientReferenceEffects.some(
+        ({ path, kind }) =>
+          kind === "escape" &&
           path.length === 2 &&
           path[0] === "commonjs-module" &&
           path[1] === null,

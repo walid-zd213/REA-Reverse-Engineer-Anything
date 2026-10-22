@@ -19,6 +19,7 @@ import {
 import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import { traverseJavaScriptAst } from "./javascriptSemanticTraversal.js";
 import { range } from "./javascriptStaticAnalysisHelpers.js";
+import { semanticPromiseSettlementDependency } from "./javascriptSemanticPromiseIdentity.js";
 import {
   assignedSemanticResultBindings,
   dataEffectMemberCallee,
@@ -52,7 +53,6 @@ interface PromiseExpressionResolutionContext {
   readonly current: PromiseCandidate;
   readonly candidateByNode: WeakMap<t.Node, PromiseCandidate>;
   readonly state: JavaScriptSemanticAnalysisState;
-  readonly seenBindings: ReadonlySet<string>;
 }
 
 interface PromiseOwnershipContext {
@@ -440,29 +440,13 @@ const resolvePromiseExpression = (
   rawNode: t.Node,
   context: PromiseExpressionResolutionContext,
 ): PromiseResolution => {
-  const { current, candidateByNode, state, seenBindings } = context;
-  const node = unwrapJavaScriptExpression(rawNode).node;
-  const direct = candidateByNode.get(node);
+  const { current, candidateByNode, state } = context;
+  const result = semanticPromiseSettlementDependency(rawNode, state);
+  const direct =
+    result === undefined ? undefined : candidateByNode.get(result.node);
   if (direct !== undefined && direct.promiseId !== current.promiseId)
     return { promiseIds: [direct.promiseId], status: "complete" };
-  if (!t.isIdentifier(node)) return unresolvedPromise();
-  const binding = resolveSemanticBindingState(state, node, node.name);
-  if (
-    binding === undefined ||
-    binding.mutable ||
-    binding.initializers.length !== 1 ||
-    seenBindings.has(binding.bindingId)
-  )
-    return unresolvedPromise();
-  const initializer = binding.initializers[0];
-  if (initializer === undefined || initializer.projection.length > 0)
-    return unresolvedPromise();
-  const nestedSeen = new Set(seenBindings);
-  nestedSeen.add(binding.bindingId);
-  return resolvePromiseExpression(initializer.node, {
-    ...context,
-    seenBindings: nestedSeen,
-  });
+  return unresolvedPromise();
 };
 
 const promiseResolutionContext = (
@@ -473,7 +457,6 @@ const promiseResolutionContext = (
   current,
   candidateByNode,
   state,
-  seenBindings: new Set(),
 });
 
 const combinePromiseResolutions = (

@@ -103,7 +103,7 @@ export const createSemanticReturnedReferences = (
       readonly result: SemanticReturnedReferenceResult;
       readonly invocation: t.Node | undefined;
       readonly iterationUnknown: boolean;
-      readonly ambientWrites: number;
+      readonly ambientEffects: number;
       readonly dependencies: readonly {
         readonly binding: JavaScriptSemanticBindingState;
         readonly writes: number;
@@ -118,7 +118,7 @@ export const createSemanticReturnedReferences = (
       existing !== undefined &&
       existing.invocation === invocation &&
       existing.iterationUnknown === state.arrayIterationUnknown &&
-      existing.ambientWrites === state.ambientWriteEffects.length &&
+      existing.ambientEffects === state.ambientReferenceEffects.length &&
       existing.dependencies.every(
         ({ binding, writes, escapes }) =>
           binding.memberWrites.length === writes &&
@@ -161,8 +161,9 @@ export const createSemanticReturnedReferences = (
     const inheritedInvocationChanged = (method: "call" | "apply"): boolean => {
       if (invocation === undefined) return false;
       const inheritedPath = ["global", "Function", "prototype", method];
-      return state.ambientWriteEffects.some(
+      return state.ambientReferenceEffects.some(
         (effect) =>
+          effect.kind === "write" &&
           effect.path.length <= inheritedPath.length &&
           effect.path.every(
             (key, index) =>
@@ -685,7 +686,7 @@ export const createSemanticReturnedReferences = (
       result,
       invocation,
       iterationUnknown: state.arrayIterationUnknown,
-      ambientWrites: state.ambientWriteEffects.length,
+      ambientEffects: state.ambientReferenceEffects.length,
       dependencies: [...dependencies].map(([binding, counts]) => ({
         binding,
         ...counts,

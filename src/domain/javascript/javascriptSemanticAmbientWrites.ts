@@ -1,6 +1,8 @@
+import { semanticExactResultOperand } from "./javascriptSemanticExpressionResults.js";
 import * as t from "@babel/types";
 
 import {
+  javaScriptExactResultOperand,
   semanticStaticPropertyKey,
   unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
@@ -16,7 +18,12 @@ import {
   type JavaScriptSemanticAnalysisState,
 } from "./javascriptSemanticState.js";
 import { isImportMetaUrl } from "./javascriptStaticAnalysisHelpers.js";
-import { semanticBindingAtRead } from "./javascriptSemanticMutationInitializers.js";
+import {
+  semanticBindingAtRead,
+  semanticTopLevelEffectFollowsCapture,
+} from "./javascriptSemanticMutationInitializers.js";
+import { semanticRequireOrigin } from "./javascriptSemanticRequireOrigin.js";
+import { semanticPropertyPathKeyMatches } from "./javascriptSemanticPropertyPaths.js";
 import {
   semanticIterationSources,
   type SemanticIterationSource,
@@ -30,6 +37,18 @@ import {
 
 const GLOBAL_OBJECT_NAMES = ["globalThis", "global", "window", "self"];
 
+/** The CommonJS ws constructor's repeated self members select the same export. */
+export const semanticRequiredWebSocketProjection = (
+  path: readonly string[],
+): readonly string[] | undefined => {
+  const canonical = canonicalAmbientPath(["commonjs-ws", ...path]);
+  return canonical.length === 1
+    ? path.length === 0
+      ? []
+      : ["WebSocket"]
+    : undefined;
+};
+
 const globalObjectName = (
   node: t.Node,
   state: JavaScriptSemanticAnalysisState,
@@ -39,11 +58,21 @@ const globalObjectName = (
 /** Global self references retain object identity, rather than adding a property. */
 const canonicalAmbientPath = (
   path: readonly (string | null)[],
+  onGlobalSelf?: (name: string) => void,
 ): readonly (string | null)[] => {
+  // The CommonJS ws constructor is its own WebSocket member. Resolve the
+  // written receiver first; the collector then appends the actual replaced key.
+  if (path[0] === "commonjs-ws") {
+    let member = 1;
+    while (path[member] === "WebSocket") member += 1;
+    return ["commonjs-ws", ...path.slice(member)];
+  }
   if (path[0] !== "global") return path;
   let firstProperty = 1;
-  while (GLOBAL_OBJECT_NAMES.includes(path[firstProperty] ?? ""))
+  while (GLOBAL_OBJECT_NAMES.includes(path[firstProperty] ?? "")) {
+    onGlobalSelf?.(path[firstProperty] as string);
     firstProperty += 1;
+  }
   return ["global", ...path.slice(firstProperty)];
 };
 
@@ -115,15 +144,15 @@ export const createAmbientPathResolver = (
           canonical = ["global", canonical[1] ?? null, ...canonical.slice(4)];
           continue;
         }
-        // An unknown key may select a global self reference as well as a
+        // An unknown key may select a known self reference as well as a
         // distinct property. Retain both possible object identities for writes.
         if (
           !possibleWrites ||
-          canonical[0] !== "global" ||
+          (canonical[0] !== "global" && canonical[0] !== "commonjs-ws") ||
           canonical[1] !== null
         )
           break;
-        canonical = canonicalAmbientPath(["global", ...canonical.slice(2)]);
+        canonical = canonicalAmbientPath([canonical[0], ...canonical.slice(2)]);
       }
     };
     while (pending.length > 0) {
@@ -158,6 +187,13 @@ export const createAmbientPathResolver = (
           suffix: path,
           ...(current.readsAtSelf && { readsAtSelf: true }),
         });
+      const exactResult = possibleWrites
+        ? javaScriptExactResultOperand(root, () => true)
+        : semanticExactResultOperand(root, state);
+      if (exactResult !== undefined) {
+        continueWith(exactResult);
+        continue;
+      }
       const continueReturned = (callee: t.Node, path: AmbientProjection) => {
         for (const source of returnedReferences(callee).references)
           continueWith(
@@ -250,6 +286,9 @@ export const createAmbientPathResolver = (
             ? binding
             : semanticBindingAtRead(binding, readAt, state.parentsByNode)
                 .binding;
+        for (const origin of selected.directOrigins)
+          if (origin.resolutionMode === "require" && origin.specifier === "ws")
+            retain(["commonjs-ws", ...origin.importedPath, ...(suffix ?? [])]);
         const initializers = possibleWrites
           ? [...selected.initializers, ...selected.referenceInitializers]
           : stable === undefined
@@ -304,6 +343,11 @@ export const createAmbientPathResolver = (
         );
         continue;
       }
+      const required = semanticRequireOrigin(root, state)?.origin;
+      if (required?.specifier === "ws") {
+        retain(["commonjs-ws", ...required.importedPath, ...(suffix ?? [])]);
+        continue;
+      }
       if (
         possibleWrites &&
         (t.isCallExpression(root) ||
@@ -329,19 +373,6 @@ export const createAmbientPathResolver = (
       }
       if (possibleWrites && t.isLogicalExpression(root)) {
         continueWith(root.left);
-        continueWith(root.right);
-        continue;
-      }
-      if (possibleWrites && t.isSequenceExpression(root)) {
-        const value = root.expressions.at(-1);
-        if (value !== undefined) continueWith(value);
-        continue;
-      }
-      if (
-        possibleWrites &&
-        t.isAssignmentExpression(root) &&
-        root.operator === "="
-      ) {
         continueWith(root.right);
         continue;
       }
@@ -642,7 +673,11 @@ export function* indexJavaScriptAmbientWritesSteps(
           ]);
     for (const resolved of paths) {
       state.ambientWrites.retain(resolved);
-      state.ambientWriteEffects.push({ path: resolved, node });
+      state.ambientReferenceEffects.push({
+        path: resolved,
+        node,
+        kind: "write",
+      });
     }
   }
   for (const { node, target, browserReceiver, projection } of escapes)
@@ -651,15 +686,25 @@ export function* indexJavaScriptAmbientWritesSteps(
       if (!(browserReceiver && path.length === 1 && path[0] === "global")) {
         const escaped = [...path, null];
         state.ambientEscapes.retain(escaped);
-        state.ambientEscapeEffects.push({ path: escaped, node });
+        state.ambientReferenceEffects.push({
+          path: escaped,
+          node,
+          kind: "escape",
+        });
       }
   // A function may call a browser method replaced later in source order.
   if (
     [...browserReceiverMethods].some((method) =>
       state.ambientWrites.covers(["global", method]),
     )
-  )
+  ) {
     state.ambientEscapes.retain(["global", null]);
+    state.ambientReferenceEffects.push({
+      path: ["global", null],
+      node: undefined,
+      kind: "escape",
+    });
+  }
 }
 
 /**
@@ -671,21 +716,51 @@ export const isUnmodifiedGlobalReference = (
   callee: t.Node,
   state: JavaScriptSemanticAnalysisState,
   name: string | readonly [string, ...string[]],
+  projection: readonly string[] = [],
 ): boolean => {
   const path: readonly [string, ...string[]] =
     typeof name === "string" ? [name] : name;
   if (state.ambientWrites.covers(["global", ...path])) return false;
   const { root, members } = electronMemberPath(callee);
-  const matches = (expected: readonly string[]) =>
-    members.length === expected.length &&
-    members.every((key, index) => key === expected[index]);
+  const selected = [...members, ...projection];
+  const matches = (expected: readonly string[], actual = selected) =>
+    actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index]);
   if (isUnshadowedGlobal(root, state, path[0]) && matches(path.slice(1)))
     return true;
   const namespace = globalObjectName(root, state);
+  let selfReferencesUnmodified = true;
+  const canonical = canonicalAmbientPath(["global", ...selected], (name) => {
+    if (state.ambientWrites.covers(["global", name]))
+      selfReferencesUnmodified = false;
+  });
   return (
     namespace !== undefined &&
-    matches(path) &&
+    selfReferencesUnmodified &&
+    matches(path, canonical.slice(1)) &&
     !state.ambientWrites.covers(["global", namespace])
+  );
+};
+
+/** Keep selected CommonJS exports separate from earlier captured constructors. */
+export const isUnmodifiedRequiredWebSocketReference = (
+  capture: t.Node,
+  state: JavaScriptSemanticAnalysisState,
+  projection: readonly string[],
+): boolean => {
+  const selected = ["commonjs-ws", ...projection];
+  if (
+    !state.ambientWrites.covers(selected) &&
+    !state.ambientEscapes.covers(selected)
+  )
+    return true;
+  return !state.ambientReferenceEffects.some(
+    ({ path, node }) =>
+      path.length <= selected.length &&
+      path.every((key, index) =>
+        semanticPropertyPathKeyMatches(key, selected[index] ?? ""),
+      ) &&
+      !semanticTopLevelEffectFollowsCapture(capture, node, state.parentsByNode),
   );
 };
 
