@@ -61,4 +61,4 @@ jobs:
             -postScript ReaArmContextProbe.java "${GITHUB_WORKSPACE}/bridge/ghidra" \
             > "${probe_root}/output.log" 2>&1 || { cat "${probe_root}/output.log"; exit 1; }
           cat "${probe_root}/output.log"
-          rg -F 'REA_ARM_CONTEXT_OK arm=0 thumb=1 unavailable=null (injected provider value)' "${probe_root}/output.log"
+          grep -F 'REA_ARM_CONTEXT_OK arm=0 thumb=1 unavailable=null (injected provider value)' "${probe_root}/output.log"
