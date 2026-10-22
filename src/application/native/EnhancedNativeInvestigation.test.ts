@@ -574,6 +574,64 @@ describe("native dispatch inventory", () => {
   );
 });
 
+it.each([
+  { className: "BuildViewController", kind: "view_controller" },
+  { className: "BuildView", kind: "view" },
+  { className: "BuildButton", kind: "control" },
+  { className: "BuildHandler", kind: "unknown" },
+])(
+  "joins the authored action for a $kind receiver through the shared workflow",
+  async ({ className, kind }) => {
+    const receiverGraph = {
+      ...graph,
+      nodes: graph.nodes.map((node) =>
+        node.id === "controller"
+          ? {
+              ...node,
+              kind: kind as "view_controller" | "view" | "control" | "unknown",
+              name: className,
+              attributes: { class_name: className },
+            }
+          : node,
+      ),
+    };
+    const tools = new EnhancedTools(
+      testAnalysis(
+        {
+          list_names: () =>
+            execution("list_names", [
+              { address: "0x1000", name: `-[${className} buildTapped:]` },
+            ]),
+        },
+        receiverGraph,
+      ),
+    );
+    const result = await tools.execute("trace_native_ui_action", {
+      action: "buildTapped:",
+    });
+
+    if (!result.ok) throw result.error;
+    const trace = nativeInvestigationTraceSchema.parse(result.value);
+    expect(
+      trace.nodes.some((node) => node.id === "native:function:0x1000"),
+    ).toBe(true);
+    expect(
+      trace.edges.find((edge) => edge.relation === "objc_dispatch"),
+    ).toMatchObject({
+      resolution: "inferred",
+      to: "native:function:0x1000",
+    });
+    expect(trace.coverage).toContainEqual(
+      expect.objectContaining({
+        facet: "ui_to_objc_dispatch",
+        status: "complete",
+        examined: 1,
+        omitted: 0,
+      }),
+    );
+  },
+);
+
 describe("native UI query outcomes", () => {
   it("resolves a control object ID through its authored action edge", async () => {
     const tools = new EnhancedTools(testAnalysis());

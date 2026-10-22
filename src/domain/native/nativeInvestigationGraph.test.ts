@@ -189,8 +189,14 @@ describe("native investigation graph traces", () => {
   });
 });
 
-describe("Interface Builder dispatch joins", () => {
-  it("joins a UI action to the target controller class, not the source control", () => {
+it.each([
+  { className: "BuildViewController", receiverKind: "view_controller" },
+  { className: "BuildView", receiverKind: "view" },
+  { className: "BuildButton", receiverKind: "control" },
+  { className: "BuildHandler", receiverKind: "unknown" },
+])(
+  "joins a UI action to the declared class of a $receiverKind receiver",
+  ({ className, receiverKind }) => {
     const ui = buildInterfaceBuilderAnalysis({
       targetSha256: "b".repeat(64),
       toolVersion: "test",
@@ -201,7 +207,7 @@ describe("Interface Builder dispatch joins", () => {
           documentKind: "storyboard_scene",
           raw: {
             "com.apple.ibtool.document.objects": {
-              controller: { customClass: "BuildViewController" },
+              controller: { customClass: className },
               button: { class: "UIButton", title: "Build" },
             },
             "com.apple.ibtool.document.connections": {
@@ -218,6 +224,11 @@ describe("Interface Builder dispatch joins", () => {
       ],
       limits: interfaceBuilderLimitsSchema.parse({}),
     });
+    expect(
+      ui.graph.nodes.find(
+        (node) => node.attributes.interface_builder_object_id === "controller",
+      )?.kind,
+    ).toBe(receiverKind);
     const joined = joinInterfaceBuilderDispatch(ui.graph, {
       objc_classes: [],
       objc_protocols: [],
@@ -227,7 +238,7 @@ describe("Interface Builder dispatch joins", () => {
       objc_protocol_records: [],
       objc_dispatch_implementations: [
         {
-          class_name: "BuildViewController",
+          class_name: className,
           selector: "buildTapped:",
           method_type: "instance",
           implementation_address: "0x1000",
@@ -250,8 +261,18 @@ describe("Interface Builder dispatch joins", () => {
         to: "native:function:0x1000",
       }),
     );
-  });
+    expect(joined.coverage).toContainEqual(
+      expect.objectContaining({
+        facet: "ui_to_objc_dispatch",
+        status: "complete",
+        examined: 1,
+        omitted: 0,
+      }),
+    );
+  },
+);
 
+describe("Interface Builder dispatch joins", () => {
   it("chooses an instance method and matches category-qualified owner names", () => {
     const ui = buildInterfaceBuilderAnalysis({
       targetSha256: "b".repeat(64),
@@ -389,16 +410,14 @@ describe("placeholder dispatch joins", () => {
         relation: "objc_dispatch",
         resolution: "inferred",
         to: "native:function:0x1000",
-        limitations: [
-          expect.stringContaining("receiver is an unresolved placeholder"),
-        ],
+        limitations: [expect.stringContaining("receiver class is unresolved")],
       }),
     );
     expect(joined.coverage).toContainEqual(
       expect.objectContaining({
         facet: "ui_to_objc_dispatch",
         status: "partial",
-        reason: "some_action_receivers_remain_placeholders",
+        reason: "some_action_dispatch_joins_are_inferred",
       }),
     );
   });

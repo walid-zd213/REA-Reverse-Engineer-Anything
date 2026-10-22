@@ -311,9 +311,14 @@ export const joinInterfaceBuilderDispatch = (
         edge.resolution === "observed" &&
         edge.relation === "target_action" &&
         edge.from === action.id &&
-        ["view_controller", "placeholder", "external_object"].includes(
-          nodes.get(edge.to)?.kind ?? "",
-        ),
+        [
+          "view_controller",
+          "view",
+          "control",
+          "unknown",
+          "placeholder",
+          "external_object",
+        ].includes(nodes.get(edge.to)?.kind ?? ""),
     );
     if (
       destinationEdge === undefined ||
@@ -324,9 +329,11 @@ export const joinInterfaceBuilderDispatch = (
     examined += 1;
     const declaredClass = owner?.attributes.class_name;
     const className =
+      ["view_controller", "view", "control", "unknown"].includes(
+        owner?.kind ?? "",
+      ) &&
       typeof declaredClass === "string" &&
-      declaredClass.length > 0 &&
-      owner?.kind === "view_controller"
+      declaredClass.length > 0
         ? declaredClass
         : null;
     const candidates = metadata.objc_dispatch_implementations.filter(
@@ -395,7 +402,7 @@ export const joinInterfaceBuilderDispatch = (
       limitations:
         className === null
           ? [
-              "The selector uniquely matches a encoded or symbolized method, but the Interface Builder receiver is an unresolved placeholder; runtime dispatch was not observed.",
+              "The selector uniquely matches an encoded or symbolized method, but the Interface Builder receiver class is unresolved; runtime dispatch was not observed.",
             ]
           : [
               "The Interface Builder target and encoded or symbolized method agree on class and selector; runtime dispatch and dynamically supplied targets were not observed.",
@@ -426,7 +433,7 @@ export const joinInterfaceBuilderDispatch = (
           examined === resolved && inferredWithoutOwnerClass === 0
             ? null
             : inferredWithoutOwnerClass > 0
-              ? "some_action_receivers_remain_placeholders"
+              ? "some_action_dispatch_joins_are_inferred"
               : "some_action_implementations_not_resolved",
         examined,
         omitted: examined - resolved + inferredWithoutOwnerClass,
