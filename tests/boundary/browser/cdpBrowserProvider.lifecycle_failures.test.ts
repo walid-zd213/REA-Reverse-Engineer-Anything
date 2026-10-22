@@ -341,6 +341,9 @@ describe("CdpBrowserProvider: cancellation and session events", () => {
         }),
       ]),
     );
+    expect(JSON.stringify(result.value.timeline)).not.toContain(
+      "ERR_BLOCKED_BY_CLIENT",
+    );
     expect(result.value.completeness.status).toBe("attach_limited");
     expect(JSON.stringify(result.value)).toContain("session-secret#spa-secret");
     expect(JSON.stringify(result.value)).toContain("redirect-secret");

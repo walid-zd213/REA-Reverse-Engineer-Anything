@@ -73,14 +73,39 @@ const clockResponseEvents: NonNullable<FakeOptions["commandEvents"]> = (
           request: { url: `${origin}/after-cutoff` },
         },
       },
+      // Network.loadingFailed has no frame; its Document request ties it
+      // to the main frame.
+      {
+        method: "Network.requestWillBeSent",
+        sessionId: command.sessionId,
+        params: {
+          requestId: "failure-before-window",
+          timestamp: 19,
+          type: "Document",
+          frameId: "frame-main",
+          request: { url: `${origin}/failure-before-window` },
+        },
+      },
       {
         method: "Network.loadingFailed",
         sessionId: command.sessionId,
         params: {
           requestId: "failure-before-window",
           timestamp: 19,
-          frameId: "frame-main",
           errorText: "net::ERR_CONNECTION_REFUSED",
+        },
+      },
+      // Network.loadingFailed has no frame; its Document request ties it
+      // to the main frame.
+      {
+        method: "Network.requestWillBeSent",
+        sessionId: command.sessionId,
+        params: {
+          requestId: "failure-window",
+          timestamp: 22,
+          type: "Document",
+          frameId: "frame-main",
+          request: { url: `${origin}/failure-window` },
         },
       },
       {
@@ -89,7 +114,6 @@ const clockResponseEvents: NonNullable<FakeOptions["commandEvents"]> = (
         params: {
           requestId: "failure-window",
           timestamp: 22,
-          frameId: "frame-main",
           errorText: "net::ERR_CONNECTION_REFUSED",
         },
       },

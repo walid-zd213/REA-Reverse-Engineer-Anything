@@ -279,10 +279,38 @@ const emitSessionTimeline = (
       redirectResponse: { status: 302 },
       timestamp: 13,
     });
-    event(socket, "Network.loadingFailed", command.sessionId, {
-      requestId: "failed-request",
+    // Network.loadingFailed has no frameId. Only the requestWillBeSent type
+    // and frame tie a failure to the main-frame document.
+    event(socket, "Network.requestWillBeSent", command.sessionId, {
+      requestId: "failed-subresource",
+      type: "Image",
       frameId: "frame-main",
       loaderId: "loader-reload",
+      request: {
+        url: `http://127.0.0.1:${String(port)}/image.png`,
+        method: "GET",
+      },
+      initiator: { type: "parser" },
+      timestamp: 14,
+    });
+    event(socket, "Network.loadingFailed", command.sessionId, {
+      requestId: "failed-subresource",
+      type: "Image",
+      errorText: "net::ERR_BLOCKED_BY_CLIENT",
+      timestamp: 14,
+    });
+    event(socket, "Network.requestWillBeSent", command.sessionId, {
+      requestId: "failed-request",
+      type: "Document",
+      frameId: "frame-main",
+      loaderId: "loader-reload",
+      request: { url: allowed, method: "GET" },
+      initiator: { type: "other" },
+      timestamp: 14,
+    });
+    event(socket, "Network.loadingFailed", command.sessionId, {
+      requestId: "failed-request",
+      type: "Document",
       errorText: "net::ERR_CONNECTION_REFUSED",
       timestamp: 14,
     });

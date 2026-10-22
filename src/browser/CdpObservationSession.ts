@@ -25,7 +25,7 @@ import {
   type UnknownRecord,
 } from "./CdpCaptureValues.js";
 import { mainFrameUrl } from "./CdpCaptureDocuments.js";
-import { cdpFrameIdentity } from "./CdpCaptureEventHelpers.js";
+import { cdpFrameId, cdpFrameIdentity } from "./CdpCaptureEventHelpers.js";
 import { cdpTargetEventMatches } from "./CdpTargetEvents.js";
 
 interface ObservationContext {
@@ -174,6 +174,13 @@ class TimelineCapture {
   finalUrl: string | null;
   #sequence = 0;
   #pendingReload = false;
+  /**
+   * Network.loadingFailed carries no frame, so a failure is attributed to the
+   * main frame only through its request. Requests that may be documents keep
+   * what their hops established about type and frame ownership. Entries leave
+   * when their request fails or, once armed, finishes.
+   */
+  readonly #documentCandidates = new Map<string, DocumentCandidate>();
   #scopeExcluded = false;
   #endReason: EndReason | undefined;
   #armTimestamp: number | undefined;
@@ -194,6 +201,13 @@ class TimelineCapture {
 
   ingest(event: CdpTransportEvent): void {
     if (this.#endReason !== undefined || this.#scopeExcluded) return;
+    if (event.method === "Network.loadingFinished") {
+      // Not a timeline fact, so it is never buffered. Before arming, its
+      // request may still wait in the buffer; that ID stays tracked, bounded by
+      // the buffer's size.
+      if (this.#armTimestamp !== undefined) this.#loadingFinished(event);
+      return;
+    }
     if (!isTimelineEvent(event.method)) return;
     if (this.#armTimestamp === undefined) {
       this.#bufferBeforeArm(event);
@@ -228,6 +242,8 @@ class TimelineCapture {
         this.#sameDocument(event, params, contextOnly);
         break;
       case "Network.requestWillBeSent":
+        // Tracked even before arming: its failure may arrive inside the window.
+        this.#trackDocumentRequest(params);
         this.#redirect(params, bufferedBeforeArm);
         break;
       case "Network.loadingFailed":
@@ -444,6 +460,51 @@ class TimelineCapture {
     this.finalUrl = destination.url;
   }
 
+  #trackDocumentRequest(params: UnknownRecord): void {
+    const requestId = cdpStringValue(params.requestId);
+    if (requestId === undefined) return;
+    const resourceType = cdpStringValue(params.type);
+    const otherType = resourceType !== undefined && resourceType !== "Document";
+    // The frame is kept as observed and classified when the failure arrives,
+    // after any root replacement has committed.
+    const frameId = cdpFrameId(params.frameId);
+    const previous = this.#documentCandidates.get(requestId);
+    if (previous === undefined) {
+      if (otherType) return;
+      this.#documentCandidates.set(requestId, {
+        declaredDocument: resourceType === "Document",
+        frameId,
+        frameConflict: false,
+      });
+      return;
+    }
+    // A redirect continues under the same ID: an omitted fact keeps what an
+    // earlier hop established, and a contradiction stays unresolved.
+    this.#documentCandidates.set(requestId, {
+      declaredDocument:
+        !otherType &&
+        (previous.declaredDocument || resourceType === "Document"),
+      frameId: previous.frameId ?? frameId,
+      frameConflict:
+        previous.frameConflict ||
+        (frameId !== undefined &&
+          previous.frameId !== undefined &&
+          frameId !== previous.frameId),
+    });
+  }
+
+  /** A finished document request can no longer fail. */
+  #loadingFinished(event: CdpTransportEvent): void {
+    const requestId = cdpStringValue(recordValue(event.params)?.requestId);
+    if (requestId !== undefined) this.#documentCandidates.delete(requestId);
+  }
+
+  #ownership(candidate: DocumentCandidate): "main" | "other" | "unknown" {
+    if (candidate.frameConflict || candidate.frameId === undefined)
+      return "unknown";
+    return candidate.frameId === this.mainFrameId ? "main" : "other";
+  }
+
   #redirect(params: UnknownRecord, bufferedBeforeArm: boolean): void {
     const resourceType = cdpStringValue(params.type);
     if (resourceType !== undefined && resourceType !== "Document") return;
@@ -481,10 +542,35 @@ class TimelineCapture {
   }
 
   #loadingFailed(params: UnknownRecord, bufferedBeforeArm: boolean): void {
-    const frame = cdpStringValue(params.frameId);
-    if (frame !== undefined && frame !== this.mainFrameId) return;
+    const requestId = cdpStringValue(params.requestId);
+    const candidate =
+      requestId === undefined
+        ? undefined
+        : this.#documentCandidates.get(requestId);
+    if (requestId !== undefined) this.#documentCandidates.delete(requestId);
+    // The failure's resource type decides; a request that omitted its type is
+    // not proof of a document.
+    const failureType = cdpStringValue(params.type);
+    if (failureType !== undefined && failureType !== "Document") return;
+    // An untracked request was not a possible main-frame document. Without a
+    // request ID the failure cannot be joined to its frame at all.
+    if (requestId !== undefined && candidate === undefined) return;
+    const frame =
+      candidate === undefined ? undefined : this.#ownership(candidate);
+    // A document owned by another frame is out of scope, not unknown.
+    if (frame === "other") return;
     const eventTime = this.#networkEventTime(params, bufferedBeforeArm);
     if (!eventTime.keep) return;
+    // Only a failure inside the window can leave the timeline incomplete.
+    if (
+      requestId === undefined ||
+      candidate === undefined ||
+      !(failureType !== undefined || candidate.declaredDocument) ||
+      frame !== "main"
+    ) {
+      this.completeness.exclude("timeline", "invalid_protocol_value");
+      return;
+    }
     this.#add({
       type: "load_failed",
       params,
@@ -492,7 +578,7 @@ class TimelineCapture {
         ? {}
         : { timestamp: eventTime.timestamp }),
       rawUrl: null,
-      requestId: cdpStringValue(params.requestId) ?? null,
+      requestId,
       detail: safeNetworkError(params.errorText),
     });
   }
@@ -669,6 +755,15 @@ const frameId = (result: unknown): string | undefined =>
   cdpStringValue(
     recordValue(recordValue(recordValue(result)?.frameTree)?.frame)?.id,
   );
+
+interface DocumentCandidate {
+  /** The request declared `Document`; otherwise its type was omitted. */
+  readonly declaredDocument: boolean;
+  /** The first frame a hop named; omitted when no hop named one. */
+  readonly frameId: string | undefined;
+  /** Hops named different frames, so ownership stays unknown. */
+  readonly frameConflict: boolean;
+}
 
 const hasNoComparableProducerTimestamp = (method: string): boolean =>
   method === "Page.frameRequestedNavigation" ||

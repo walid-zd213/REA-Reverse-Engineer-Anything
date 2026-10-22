@@ -330,6 +330,506 @@ it.each([
   },
 );
 
+it("records a load failure only for a main-frame document that has not finished", async () => {
+  const documentRequest = (
+    command: Parameters<NonNullable<FakeOptions["commandEvents"]>>[0],
+    origin: string,
+    requestId: string,
+  ) => ({
+    method: "Network.requestWillBeSent",
+    sessionId: command.sessionId,
+    params: {
+      requestId,
+      timestamp: 21,
+      type: "Document",
+      frameId: "frame-main",
+      request: { url: `${origin}/${requestId}` },
+    },
+  });
+  const loadingFailed = (
+    command: Parameters<NonNullable<FakeOptions["commandEvents"]>>[0],
+    requestId: string,
+  ) => ({
+    method: "Network.loadingFailed",
+    sessionId: command.sessionId,
+    params: {
+      requestId,
+      timestamp: 22,
+      type: "Document",
+      errorText: "net::ERR_CONNECTION_REFUSED",
+    },
+  });
+  const { observation } = await observeWithFake({
+    eventsBeforeReply: ["Page.setLifecycleEventsEnabled"],
+    commandEvents: (command, origin) => {
+      if (command.method !== "Page.setLifecycleEventsEnabled") return undefined;
+      return [
+        documentRequest(command, origin, "finished-document"),
+        {
+          method: "Network.loadingFinished",
+          sessionId: command.sessionId,
+          params: { requestId: "finished-document", timestamp: 22 },
+        },
+        // A finished request is no longer tracked, so a stray failure for it
+        // is not attributed to the main frame.
+        loadingFailed(command, "finished-document"),
+        documentRequest(command, origin, "failed-document"),
+        loadingFailed(command, "failed-document"),
+      ];
+    },
+  });
+
+  expect(
+    observation.timeline
+      .filter((event) => event.type === "load_failed")
+      .map((event) => event.request_id),
+  ).toEqual(["failed-document"]);
+});
+
+it("uses the failure's resource type when a main-frame request omits its type", async () => {
+  const untypedRequest = (
+    command: Parameters<NonNullable<FakeOptions["commandEvents"]>>[0],
+    origin: string,
+    requestId: string,
+  ) => ({
+    method: "Network.requestWillBeSent",
+    sessionId: command.sessionId,
+    params: {
+      requestId,
+      timestamp: 21,
+      frameId: "frame-main",
+      request: { url: `${origin}/${requestId}` },
+    },
+  });
+  const loadingFailed = (
+    command: Parameters<NonNullable<FakeOptions["commandEvents"]>>[0],
+    requestId: string,
+    type?: string,
+  ) => ({
+    method: "Network.loadingFailed",
+    sessionId: command.sessionId,
+    params: {
+      requestId,
+      timestamp: 22,
+      ...(type === undefined ? {} : { type }),
+      errorText: "net::ERR_CONNECTION_REFUSED",
+    },
+  });
+  const { observation } = await observeWithFake({
+    eventsBeforeReply: ["Page.setLifecycleEventsEnabled"],
+    commandEvents: (command, origin) => {
+      if (command.method !== "Page.setLifecycleEventsEnabled") return undefined;
+      return [
+        untypedRequest(command, origin, "untyped-image"),
+        loadingFailed(command, "untyped-image", "Image"),
+        untypedRequest(command, origin, "untyped-document"),
+        loadingFailed(command, "untyped-document", "Document"),
+        untypedRequest(command, origin, "untyped-unknown"),
+        loadingFailed(command, "untyped-unknown"),
+      ];
+    },
+  });
+
+  expect(
+    observation.timeline
+      .filter((event) => event.type === "load_failed")
+      .map((event) => event.request_id),
+  ).toEqual(["untyped-document"]);
+  // Neither event declared a type, so the failure stays unknown.
+  expect(observation.completeness.excluded).toContainEqual(
+    expect.objectContaining({
+      section: "timeline",
+      reason: "invalid_protocol_value",
+    }),
+  );
+});
+
+it("does not report an untyped failure before the window as incomplete coverage", async () => {
+  const { observation } = await observeDuringClockSampling(
+    (command, origin) => {
+      if (command.method !== "Performance.getMetrics") return undefined;
+      return [
+        {
+          method: "Network.requestWillBeSent",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "untyped-before-window",
+            timestamp: 18,
+            frameId: "frame-main",
+            request: { url: `${origin}/untyped-before-window` },
+          },
+        },
+        {
+          method: "Network.loadingFailed",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "untyped-before-window",
+            timestamp: 19,
+            errorText: "net::ERR_CONNECTION_REFUSED",
+          },
+        },
+      ];
+    },
+  );
+
+  expect(
+    observation.timeline.filter((event) => event.type === "load_failed"),
+  ).toEqual([]);
+  expect(observation.completeness.excluded).not.toContainEqual(
+    expect.objectContaining({
+      section: "timeline",
+      reason: "invalid_protocol_value",
+    }),
+  );
+});
+
+it("reports a document failure whose request omitted its frame as unknown coverage", async () => {
+  const { observation } = await observeWithFake({
+    eventsBeforeReply: ["Page.setLifecycleEventsEnabled"],
+    commandEvents: (command, origin) => {
+      if (command.method !== "Page.setLifecycleEventsEnabled") return undefined;
+      return [
+        {
+          method: "Network.requestWillBeSent",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "frameless-document",
+            timestamp: 21,
+            type: "Document",
+            request: { url: `${origin}/frameless-document` },
+          },
+        },
+        {
+          method: "Network.loadingFailed",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "frameless-document",
+            timestamp: 22,
+            type: "Document",
+            errorText: "net::ERR_CONNECTION_REFUSED",
+          },
+        },
+        {
+          method: "Network.requestWillBeSent",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "child-frame-document",
+            timestamp: 21,
+            type: "Document",
+            frameId: "frame-child",
+            request: { url: `${origin}/child-frame-document` },
+          },
+        },
+        {
+          method: "Network.loadingFailed",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "child-frame-document",
+            timestamp: 22,
+            type: "Document",
+            errorText: "net::ERR_CONNECTION_REFUSED",
+          },
+        },
+      ];
+    },
+  });
+
+  // Neither failure is attributed to the main frame. Only the frameless one
+  // leaves ownership unknown; the child frame's failure is out of scope.
+  expect(
+    observation.timeline.filter((event) => event.type === "load_failed"),
+  ).toEqual([]);
+  expect(
+    observation.completeness.excluded.filter(
+      (exclusion) =>
+        exclusion.section === "timeline" &&
+        exclusion.reason === "invalid_protocol_value",
+    ),
+  ).toEqual([expect.objectContaining({ count: 1 })]);
+});
+
+it("reports a possible document failure without a request ID as unknown coverage", async () => {
+  const failureWithoutRequestId = (
+    command: Parameters<NonNullable<FakeOptions["commandEvents"]>>[0],
+    type: string,
+  ) => ({
+    method: "Network.loadingFailed",
+    sessionId: command.sessionId,
+    params: {
+      timestamp: 22,
+      type,
+      errorText: "net::ERR_CONNECTION_REFUSED",
+    },
+  });
+  const { observation } = await observeWithFake({
+    eventsBeforeReply: ["Page.setLifecycleEventsEnabled"],
+    commandEvents: (command) => {
+      if (command.method !== "Page.setLifecycleEventsEnabled") return undefined;
+      return [
+        failureWithoutRequestId(command, "Image"),
+        failureWithoutRequestId(command, "Document"),
+      ];
+    },
+  });
+
+  // The image is filtered by its own type; the document cannot be joined to a
+  // frame, so its coverage is reported as unknown.
+  expect(
+    observation.timeline.filter((event) => event.type === "load_failed"),
+  ).toEqual([]);
+  expect(
+    observation.completeness.excluded.filter(
+      (exclusion) =>
+        exclusion.section === "timeline" &&
+        exclusion.reason === "invalid_protocol_value",
+    ),
+  ).toEqual([expect.objectContaining({ count: 1 })]);
+});
+
+it("keeps main-frame ownership across a redirect hop that omits its frame", async () => {
+  const { observation } = await observeWithFake({
+    eventsBeforeReply: ["Page.setLifecycleEventsEnabled"],
+    commandEvents: (command, origin) => {
+      if (command.method !== "Page.setLifecycleEventsEnabled") return undefined;
+      return [
+        {
+          method: "Network.requestWillBeSent",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "redirected-document",
+            timestamp: 21,
+            type: "Document",
+            frameId: "frame-main",
+            request: { url: `${origin}/first-hop` },
+          },
+        },
+        {
+          // The continuation reuses the request ID and omits its frame.
+          method: "Network.requestWillBeSent",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "redirected-document",
+            timestamp: 21.5,
+            type: "Document",
+            redirectResponse: { url: `${origin}/first-hop`, status: 302 },
+            request: { url: `${origin}/second-hop` },
+          },
+        },
+        {
+          method: "Network.loadingFailed",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "redirected-document",
+            timestamp: 22,
+            type: "Document",
+            errorText: "net::ERR_CONNECTION_REFUSED",
+          },
+        },
+      ];
+    },
+  });
+
+  expect(observation.timeline).toContainEqual(
+    expect.objectContaining({
+      type: "load_failed",
+      request_id: "redirected-document",
+    }),
+  );
+});
+
+it("keeps child-frame ownership across a redirect hop that omits its frame", async () => {
+  const { observation } = await observeWithFake({
+    eventsBeforeReply: ["Page.setLifecycleEventsEnabled"],
+    commandEvents: (command, origin) => {
+      if (command.method !== "Page.setLifecycleEventsEnabled") return undefined;
+      return [
+        {
+          method: "Network.requestWillBeSent",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "redirected-child-document",
+            timestamp: 21,
+            type: "Document",
+            frameId: "frame-child",
+            request: { url: `${origin}/child-first-hop` },
+          },
+        },
+        {
+          method: "Network.requestWillBeSent",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "redirected-child-document",
+            timestamp: 21.5,
+            type: "Document",
+            redirectResponse: { url: `${origin}/child-first-hop`, status: 302 },
+            request: { url: `${origin}/child-second-hop` },
+          },
+        },
+        {
+          method: "Network.loadingFailed",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "redirected-child-document",
+            timestamp: 22,
+            type: "Document",
+            errorText: "net::ERR_CONNECTION_REFUSED",
+          },
+        },
+      ];
+    },
+  });
+
+  // The first hop proved another frame, so the failure is out of scope.
+  expect(
+    observation.timeline.filter((event) => event.type === "load_failed"),
+  ).toEqual([]);
+  expect(observation.completeness.excluded).not.toContainEqual(
+    expect.objectContaining({
+      section: "timeline",
+      reason: "invalid_protocol_value",
+    }),
+  );
+});
+
+it("attributes a failure to a root replacement that commits after its request", async () => {
+  const { observation } = await observeWithFake({
+    eventsBeforeReply: ["Page.setLifecycleEventsEnabled"],
+    commandEvents: (command, origin) => {
+      if (command.method !== "Page.setLifecycleEventsEnabled") return undefined;
+      return [
+        {
+          method: "Network.requestWillBeSent",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "replacement-document",
+            timestamp: 21,
+            type: "Document",
+            frameId: "replacement-main",
+            request: { url: `${origin}/replacement` },
+          },
+        },
+        frameNavigated(command, {
+          id: "replacement-main",
+          loaderId: "replacement-loader",
+          url: `${origin}/replacement`,
+        }),
+        {
+          method: "Network.loadingFailed",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "replacement-document",
+            timestamp: 22,
+            type: "Document",
+            errorText: "net::ERR_CONNECTION_REFUSED",
+          },
+        },
+      ];
+    },
+  });
+
+  expect(observation.timeline).toContainEqual(
+    expect.objectContaining({
+      type: "load_failed",
+      request_id: "replacement-document",
+    }),
+  );
+});
+
+it("keeps contradictory redirect ownership unknown after a later hop agrees again", async () => {
+  const hop = (
+    command: Parameters<NonNullable<FakeOptions["commandEvents"]>>[0],
+    origin: string,
+    frameId: string,
+    hopIndex: number,
+  ) => ({
+    method: "Network.requestWillBeSent",
+    sessionId: command.sessionId,
+    params: {
+      requestId: "contradictory-document",
+      timestamp: 21 + hopIndex / 10,
+      type: "Document",
+      frameId,
+      ...(hopIndex === 0
+        ? {}
+        : { redirectResponse: { url: `${origin}/hop-${String(hopIndex)}` } }),
+      request: { url: `${origin}/hop-${String(hopIndex + 1)}` },
+    },
+  });
+  const { observation } = await observeWithFake({
+    eventsBeforeReply: ["Page.setLifecycleEventsEnabled"],
+    commandEvents: (command, origin) => {
+      if (command.method !== "Page.setLifecycleEventsEnabled") return undefined;
+      return [
+        hop(command, origin, "frame-main", 0),
+        hop(command, origin, "frame-child", 1),
+        hop(command, origin, "frame-main", 2),
+        {
+          method: "Network.loadingFailed",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "contradictory-document",
+            timestamp: 22,
+            type: "Document",
+            errorText: "net::ERR_CONNECTION_REFUSED",
+          },
+        },
+      ];
+    },
+  });
+
+  expect(
+    observation.timeline.filter((event) => event.type === "load_failed"),
+  ).toEqual([]);
+  expect(observation.completeness.excluded).toContainEqual(
+    expect.objectContaining({
+      section: "timeline",
+      reason: "invalid_protocol_value",
+    }),
+  );
+});
+
+it("treats an empty request frame ID as unknown ownership", async () => {
+  const { observation } = await observeWithFake({
+    eventsBeforeReply: ["Page.setLifecycleEventsEnabled"],
+    commandEvents: (command, origin) => {
+      if (command.method !== "Page.setLifecycleEventsEnabled") return undefined;
+      return [
+        {
+          method: "Network.requestWillBeSent",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "empty-frame-document",
+            timestamp: 21,
+            type: "Document",
+            frameId: "",
+            request: { url: `${origin}/empty-frame-document` },
+          },
+        },
+        {
+          method: "Network.loadingFailed",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "empty-frame-document",
+            timestamp: 22,
+            type: "Document",
+            errorText: "net::ERR_CONNECTION_REFUSED",
+          },
+        },
+      ];
+    },
+  });
+
+  expect(
+    observation.timeline.filter((event) => event.type === "load_failed"),
+  ).toEqual([]);
+  expect(observation.completeness.excluded).toContainEqual(
+    expect.objectContaining({
+      section: "timeline",
+      reason: "invalid_protocol_value",
+    }),
+  );
+});
+
 it("represents absent timeline timestamps as unknown and preserves an observed zero", async () => {
   const { browser, observation } = await observeWithFake({
     eventsBeforeReply: ["Page.setLifecycleEventsEnabled"],
@@ -345,12 +845,24 @@ it("represents absent timeline timestamps as unknown and preserves an observed z
             navigationType: "historyApi",
           },
         },
+        // Network.loadingFailed has no frame; its Document request ties it
+        // to the main frame.
+        {
+          method: "Network.requestWillBeSent",
+          sessionId: command.sessionId,
+          params: {
+            requestId: "actual-zero-clock-value",
+            timestamp: 0,
+            type: "Document",
+            frameId: "frame-main",
+            request: { url: `${origin}/actual-zero-clock-value` },
+          },
+        },
         {
           method: "Network.loadingFailed",
           sessionId: command.sessionId,
           params: {
             requestId: "actual-zero-clock-value",
-            frameId: "frame-main",
             errorText: "net::ERR_CONNECTION_REFUSED",
             timestamp: 0,
           },

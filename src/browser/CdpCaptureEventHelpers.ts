@@ -41,6 +41,10 @@ export interface CdpFrameIdentity {
 const nonEmptyString = (value: unknown): string | undefined =>
   typeof value === "string" && value.length > 0 ? value : undefined;
 
+/** A CDP frame ID is a non-empty string; anything else is no frame identity. */
+export const cdpFrameId = (value: unknown): string | undefined =>
+  nonEmptyString(value);
+
 const identityIssueFor = (
   navigated: boolean,
   frame: UnknownRecord | undefined,
