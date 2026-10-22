@@ -423,7 +423,14 @@ const clientConfigurationDetail = (
   environment: SetupProviderEnvironment,
   installHopper: boolean,
 ): string => {
-  const entries = Object.entries(environment)
+  // Mirror the compact-schema default applied in SetupClientConfiguration for
+  // Bob and Kimi so the dry-run plan discloses REA_MCP_INPUT_SCHEMA_PROFILE=compact.
+  const effectiveEnvironment =
+    (client.name === "kimi" || client.name === "bob") &&
+    environment.REA_MCP_INPUT_SCHEMA_PROFILE === undefined
+      ? { ...environment, REA_MCP_INPUT_SCHEMA_PROFILE: "compact" as const }
+      : environment;
+  const entries = Object.entries(effectiveEnvironment)
     .sort(([left], [right]) => compareUnicodeCodePoints(left, right))
     .map(([name, value]) => `${name}=${value}`);
   const environmentDetail =
@@ -431,7 +438,7 @@ const clientConfigurationDetail = (
       ? " No additional provider environment variables. Existing server environment overrides are retained."
       : ` Detected provider environment: ${entries.join(", ")}. Existing server environment overrides are retained; detected values replace matching keys.`;
   const hopperDetail = installHopper
-    ? environment.HOPPER_LAUNCHER_PATH === undefined
+    ? effectiveEnvironment.HOPPER_LAUNCHER_PATH === undefined
       ? " If this plan installs Hopper, REA will add HOPPER_LAUNCHER_PATH using the launcher path reported by that installation."
       : " The HOPPER_LAUNCHER_PATH value shown above is the current fallback; if this plan installs Hopper, REA will replace it with the launcher path reported by that installation."
     : "";

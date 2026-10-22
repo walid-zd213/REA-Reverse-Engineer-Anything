@@ -776,8 +776,10 @@ const clientConfigurationDesired = async (
     "fragment",
   );
   if (!environment.ok) throw environment.error;
+  // Kimi and IBM Bob both refuse or degrade on the full input-schema payload
+  // (Bob Shell drops a server whose tools exceed 300 KB), so default to compact.
   const registrationEnvironment =
-    client.name === "kimi" &&
+    (client.name === "kimi" || client.name === "bob") &&
     snapshotEnvironment(environment.value).REA_MCP_INPUT_SCHEMA_PROFILE ===
       undefined
       ? {
