@@ -13,15 +13,17 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { Readable } from "node:stream";
+import { Duplex, Readable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 import { SafeOutputTree } from "../../../src/artifacts/SafeOutputTree.js";
+import { SafeOutputSourceFailure } from "../../../src/artifacts/SafeOutputSourceFailure.js";
 import { SafeOutputTreeCreationFailure } from "../../../src/artifacts/SafeOutputTreeCreationFailure.js";
 import { ArtifactReaderFailure } from "../../../src/artifacts/ArtifactReader.js";
+import { readArtifactFileChunks } from "../../../src/artifacts/readArtifactFileChunks.js";
 
 describe("safe artifact output cleanup", () => {
   it("adopts an empty caller directory without taking authority to remove it", async () => {
@@ -526,6 +528,231 @@ describe("safe artifact output Windows stream paths", () => {
         status: "complete",
         residualPaths: [],
       });
+    },
+  );
+});
+
+describe("safe artifact output sources without close events", () => {
+  it.each([false, true])(
+    "returns a destination refusal after silent destruction (deferred: %s)",
+    async (deferred) => {
+      const parent = await createTestTempDirectory("rea-output-silent-close-");
+      const output = join(parent, "output");
+      const tree = await SafeOutputTree.create(output);
+      let completeDestroy!: () => void;
+      let destroying!: () => void;
+      const destructionStarted = new Promise<void>((resolve) => {
+        destroying = resolve;
+      });
+      const source = new Readable({
+        emitClose: false,
+        read() {
+          throw new Error("refused destination must not consume input");
+        },
+        destroy(_error, callback) {
+          completeDestroy = () => callback(null);
+          if (!deferred) completeDestroy();
+          destroying();
+        },
+      });
+      let settled = false;
+      const pending = tree
+        .write("../outside", source, { bytes: 0, sha256: "" })
+        .catch((cause: unknown) => cause)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        await destructionStarted;
+        if (deferred) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(settled).toBe(false);
+          expect(source.closed).toBe(false);
+          completeDestroy();
+        }
+        await vi.waitFor(() => expect(settled).toBe(true));
+        expect(await pending).toMatchObject({ reason: "path" });
+        expect(source.closed).toBe(true);
+        expect(source.listenerCount("error")).toBe(0);
+        expect(source.listenerCount("end")).toBe(0);
+        expect(source.listenerCount("close")).toBe(0);
+      } finally {
+        if (!source.closed) completeDestroy();
+        expect(await tree.rollback()).toEqual({
+          status: "complete",
+          residualPaths: [],
+        });
+      }
+      await expect(access(output)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  it.each([false, true])(
+    "preserves a silent source outcome (read failure: %s)",
+    async (failRead) => {
+      const parent = await createTestTempDirectory("rea-output-silent-read-");
+      const output = join(parent, "output");
+      const tree = await SafeOutputTree.create(output);
+      const failure = new Error("source read failed");
+      const source = new Readable({
+        emitClose: false,
+        read() {
+          this.push(Buffer.from("owned"));
+          if (failRead) this.destroy(failure);
+          else this.push(null);
+        },
+      });
+      try {
+        const pending = tree.write("file", source, {
+          bytes: 5,
+          sha256: createHash("sha256").update("owned").digest("hex"),
+        });
+        if (failRead) await expect(pending).rejects.toBe(failure);
+        else {
+          await expect(pending).resolves.toMatchObject({ bytesWritten: 5 });
+          expect(await readFile(join(output, "file"), "utf8")).toBe("owned");
+        }
+        expect(source.closed).toBe(true);
+      } finally {
+        expect(await tree.rollback()).toEqual({
+          status: "complete",
+          residualPaths: [],
+        });
+      }
+      await expect(access(output)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+});
+
+describe("safe artifact output source lifetime", () => {
+  it("consumes only the readable side of a duplex source", async () => {
+    const parent = await createTestTempDirectory("rea-output-duplex-");
+    const output = join(parent, "output");
+    const tree = await SafeOutputTree.create(output);
+    const source = new Duplex({
+      allowHalfOpen: true,
+      read() {
+        this.push(Buffer.from("owned"));
+        this.push(null);
+      },
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    });
+    try {
+      await expect(
+        tree.write("file", source, {
+          bytes: 5,
+          sha256: createHash("sha256").update("owned").digest("hex"),
+        }),
+      ).resolves.toMatchObject({ bytesWritten: 5 });
+      expect(source.writableEnded).toBe(false);
+      expect(await readFile(join(output, "file"), "utf8")).toBe("owned");
+    } finally {
+      source.destroy();
+      await tree.rollback();
+    }
+  });
+  it.each([false, true])(
+    "preserves cancellation before source consumption (already aborted: %s)",
+    async (alreadyAborted) => {
+      const parent = await createTestTempDirectory("rea-output-source-");
+      const input = join(parent, "input");
+      const output = join(parent, "output");
+      await writeFile(input, "owned");
+      const handle = await open(input, "r");
+      const tree = await SafeOutputTree.create(output);
+      const controller = new AbortController();
+      const reason = new DOMException("publication deadline", "TimeoutError");
+      if (alreadyAborted) controller.abort(reason);
+      const source = readArtifactFileChunks(handle, {
+        signal: controller.signal,
+      });
+      try {
+        const pending = tree.write(
+          "nested/file",
+          source,
+          {
+            bytes: 5,
+            sha256: createHash("sha256").update("owned").digest("hex"),
+          },
+          controller.signal,
+        );
+        if (!alreadyAborted) controller.abort(reason);
+        await expect(pending).rejects.toMatchObject({
+          reason: "cancelled",
+          cause: reason,
+        });
+        expect(source.closed).toBe(true);
+        expect(source.readCoverage()).toEqual({
+          kind: "incomplete",
+          bytes: 0n,
+        });
+        expect(await tree.rollback()).toEqual({
+          status: "complete",
+          residualPaths: [],
+        });
+        await expect(access(output)).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        await tree.rollback();
+        await handle.close();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "settles an unread source before returning a destination refusal (early error: %s)",
+    async (earlyError) => {
+      const parent = await createTestTempDirectory("rea-output-refusal-");
+      const tree = await SafeOutputTree.create(join(parent, "output"));
+      let completeDestroy!: () => void;
+      let destroying!: () => void;
+      const destructionStarted = new Promise<void>((resolve) => {
+        destroying = resolve;
+      });
+      const source = new Readable({
+        read() {
+          throw new Error("refused destination must not consume input");
+        },
+        destroy(_error, callback) {
+          completeDestroy = () => callback(new Error("source cleanup failure"));
+          destroying();
+        },
+      });
+      let settled = false;
+      const pending = tree
+        .write("../outside", source, { bytes: 0, sha256: "" })
+        .catch((cause: unknown) => cause)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        await destructionStarted;
+        if (earlyError) source.emit("error", new Error("early source failure"));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+      } finally {
+        completeDestroy();
+        const failure = await pending;
+        expect(failure).toBeInstanceOf(ArtifactReaderFailure);
+        expect(failure).toMatchObject({ reason: "path" });
+        const sourceFailures = (failure as SafeOutputSourceFailure)
+          .sourceFailures;
+        expect(sourceFailures).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ message: "source cleanup failure" }),
+          ]),
+        );
+        if (earlyError)
+          expect(sourceFailures).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ message: "early source failure" }),
+            ]),
+          );
+        expect((failure as ArtifactReaderFailure).cleanup).toBeUndefined();
+        expect(source.closed).toBe(true);
+        await tree.rollback();
+      }
     },
   );
 });

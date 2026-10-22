@@ -65,6 +65,56 @@ export type ArtifactCleanupAttempt =
       readonly lease: AnalysisCleanupLease;
     };
 
+/** Preserve independent primary and cleanup authorities through scope composition. */
+export class ArtifactResourceCleanupFailure extends ArtifactReaderFailure {
+  constructor(
+    readonly outcome:
+      | { readonly kind: "completed" }
+      | { readonly kind: "failed"; readonly cause: unknown },
+    readonly failures: readonly [
+      Extract<ArtifactCleanupAttempt, { readonly kind: "failed" }>,
+      ...Extract<ArtifactCleanupAttempt, { readonly kind: "failed" }>[],
+    ],
+    partialObservation?: AnalysisPartialObservation,
+  ) {
+    const observations = failures.map(({ cause, owner }) =>
+      ArtifactReaderFailure.cleanupObservation(cause, owner.resource),
+    );
+    const primary =
+      outcome.kind === "failed" ? outcome.cause : failures[0].cause;
+    const inherited =
+      outcome.kind === "failed" ? artifactPrimaryCleanupLeases(primary) : [];
+    const projected = ArtifactReaderFailure.withCleanup(
+      primary,
+      {
+        reason: observations.map(({ reason }) => reason).join("; "),
+        resources: [
+          ...new Set(observations.flatMap(({ resources }) => resources)),
+        ],
+      },
+      partialObservation,
+      inherited === undefined
+        ? undefined
+        : [...new Set([...inherited, ...failures.map(({ lease }) => lease)])],
+    );
+    super(
+      projected.reason,
+      projected.message,
+      {
+        cause: projected.cause,
+        cancellation: projected.cancellation,
+        cleanup: projected.cleanup,
+        cleanupLeases: projected.cleanupLeases,
+        partialObservation: projected.partialObservation,
+        ...(projected.boundary === undefined
+          ? {}
+          : { boundary: projected.boundary }),
+      },
+      projected.details,
+    );
+  }
+}
+
 /** Retry failure carrying the exact retained owners that did not release. */
 export class ArtifactResourceRetryFailure extends ArtifactReaderFailure {
   readonly failedOwners: readonly ArtifactResourceOwner[];
@@ -169,25 +219,10 @@ export class ArtifactResourceScope {
     ],
     partialObservation?: AnalysisPartialObservation,
   ): ArtifactReaderFailure {
-    const observations = failures.map(({ cause, owner }) =>
-      ArtifactReaderFailure.cleanupObservation(cause, owner.resource),
-    );
-    const primary =
-      outcome.kind === "failed" ? outcome.cause : failures[0].cause;
-    const inherited =
-      outcome.kind === "failed" ? artifactPrimaryCleanupLeases(primary) : [];
-    return ArtifactReaderFailure.withCleanup(
-      primary,
-      {
-        reason: observations.map(({ reason }) => reason).join("; "),
-        resources: [
-          ...new Set(observations.flatMap(({ resources }) => resources)),
-        ],
-      },
+    return new ArtifactResourceCleanupFailure(
+      outcome,
+      failures,
       partialObservation,
-      inherited === undefined
-        ? undefined
-        : [...new Set([...inherited, ...failures.map(({ lease }) => lease)])],
     );
   }
 

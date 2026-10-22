@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { Readable } from "node:stream";
+import { setImmediate, setTimeout } from "node:timers/promises";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { streamChunkToBuffer } from "./StreamBytes.js";
 
@@ -20,6 +21,7 @@ import {
 } from "./ArtifactPaths.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { ArtifactReaderFailure } from "./ArtifactReader.js";
+import { SafeOutputSourceFailure } from "./SafeOutputSourceFailure.js";
 import { SafeOutputTreeCreationFailure } from "./SafeOutputTreeCreationFailure.js";
 import { hashOutputFile } from "./SafeOutputTreeReadback.js";
 import { removeOwnedTree } from "./SafeOutputTreeCleanup.js";
@@ -166,6 +168,14 @@ export class SafeOutputTree {
     expected: { readonly sha256: string; readonly bytes: number },
     signal?: AbortSignal,
   ): Promise<SafeOutputFile> {
+    // Own errors before asynchronous destination setup, without starting reads.
+    // Retain the observer through destruction, including late cleanup errors.
+    const sourceFailures = new Set<unknown>();
+    const observeSourceFailure = (failure: unknown): void => {
+      sourceFailures.add(failure);
+    };
+    if (source.errored !== null) observeSourceFailure(source.errored);
+    source.on("error", observeSourceFailure);
     try {
       this.#assertWritable();
       if (!Number.isSafeInteger(expected.bytes) || expected.bytes < 0)
@@ -215,7 +225,12 @@ export class SafeOutputTree {
       const hash = createHash("sha256");
       let bytes = 0;
       await this.#assertLineage(lineage);
-      for await (const raw of source) {
+      // Setup can observe an error event without the stream ending or entering
+      // its destroyed/errored state. Do not wait for a second event to exit.
+      if (sourceFailures.size > 0) throw sourceFailures.values().next().value;
+      abortIfNeeded(signal);
+      // This owner joins destruction and records its failures on early exit.
+      for await (const raw of source.iterator({ destroyOnReturn: false })) {
         abortIfNeeded(signal);
         const chunk = streamChunkToBuffer(raw);
         if (chunk.length > expected.bytes - bytes)
@@ -259,14 +274,34 @@ export class SafeOutputTree {
           "integrity",
           `Durable readback verification failed: ${path}`,
         );
+      await joinSourceDestruction(source);
+      if (sourceFailures.size > 0) throw sourceFailures.values().next().value;
+      abortIfNeeded(signal);
       return { relativePath: path, sha256, bytesWritten: bytes };
     } catch (cause: unknown) {
       try {
         source.destroy();
-      } catch {
-        // Preserve the write refusal or failure as the caller-visible error.
+        await joinSourceDestruction(source);
+      } catch (cleanupCause: unknown) {
+        observeSourceFailure(cleanupCause);
       }
+      const secondaryFailures = [...sourceFailures].filter(
+        (failure) => failure !== cause,
+      );
+      const primaryIsSource = sourceFailures.has(cause);
+      if (
+        secondaryFailures.length > 0 ||
+        (primaryIsSource &&
+          ArtifactReaderFailure.from(cause).cleanup !== undefined)
+      )
+        throw new SafeOutputSourceFailure(
+          cause,
+          secondaryFailures,
+          primaryIsSource,
+        );
       throw cause;
+    } finally {
+      source.off("error", observeSourceFailure);
     }
   }
 
@@ -641,6 +676,14 @@ const writeAll = async (
       );
     offset += bytesWritten;
   }
+};
+
+/** Join started destruction, including silent auto-destroy after normal end. */
+const joinSourceDestruction = async (source: Readable): Promise<void> => {
+  // Let queued end/destroy notifications run before observing the resource state.
+  // A completed readable side need not destroy an open duplex writable side.
+  await setImmediate();
+  while (source.destroyed && !source.closed) await setTimeout(10);
 };
 
 const normalizeDestinationPath = (
