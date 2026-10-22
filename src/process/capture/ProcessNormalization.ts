@@ -370,12 +370,14 @@ const normalizePortsBounded = (
   );
   if (endpoint.state === "over_budget") return endpoint;
   const afterEndpoint = endpoint.state === "bounded" ? endpoint.value : value;
-  return boundedRegexReplace(
+  const field = boundedRegexReplace(
     afterEndpoint,
     PORT_FIELD_MATCHER,
     portFieldReplacement,
     maxBytes,
   );
+  if (field.state === "over_budget" || field.state === "bounded") return field;
+  return endpoint.state === "bounded" ? endpoint : field;
 };
 
 /** Project sampled observations under the caller-selected normalization rules. */
