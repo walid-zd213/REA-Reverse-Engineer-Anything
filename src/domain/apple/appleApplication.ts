@@ -292,7 +292,7 @@ const classifyComponents = (
       ({ path, format }) =>
         isMachOFormat(format) && (withinApp(path) || !isNativeLibrary(path)),
     ),
-    frameworks: all.filter(({ path }) => /\.framework\//u.test(path)),
+    frameworks: all.filter(({ path }) => /\.framework\//iu.test(path)),
     native_libraries: all.filter(({ path }) => isNativeLibrary(path)),
     javascript: all.filter(({ format }) => format === "javascript-bundle"),
     signing: all.filter(
