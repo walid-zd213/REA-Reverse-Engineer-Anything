@@ -3,6 +3,31 @@ import type { NativeCommandCapture } from "./CommandRunner.js";
 import { withoutEchoedPathHeader } from "./parsers/echoedPath.js";
 
 const MISSING_UUID_DIAGNOSTIC = "missing LC_UUID load command";
+const DSYM_SECTION_DIAGNOSTIC =
+  "section '__TEXT/__text' has offset=0 but is not a zero-fill section type";
+
+/** Narrow dyld_info refusals for readable Mach-O layouts, subject to otool confirmation. */
+export const targetLayoutDyldRefusal = (
+  capture: NativeCommandCapture,
+): "DSYM" | "CORE" | "FVMLIB" | null => {
+  if (
+    capture.tool !== "dyld_info" ||
+    capture.exitCode === null ||
+    capture.exitCode === 0 ||
+    capture.signal !== null
+  )
+    return null;
+  const lines = withoutEchoedPathHeader(
+    capture.stdout,
+    capture.arguments.at(-1),
+  )
+    .split(/\r?\n/u)
+    .map((line) => line.trim().replace(/^(?:dyld_info:\s*)/u, ""));
+  if (lines.includes(DSYM_SECTION_DIAGNOSTIC)) return "DSYM";
+  if (lines.includes("unknown mh.filetype 4")) return "CORE";
+  if (lines.includes("unknown mh.filetype 3")) return "FVMLIB";
+  return null;
+};
 
 /** Recognize only dyld_info's target-specific missing-UUID refusal. */
 export const isMissingUuidDyldFailure = (

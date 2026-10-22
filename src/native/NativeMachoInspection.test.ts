@@ -403,3 +403,91 @@ describe("Mach-O slice command scheduling", () => {
     expect(result.error).toMatchObject({ reason: "nm failed" });
   });
 });
+
+describe("Mach-O target-layout refusals", () => {
+  const inspectRefusal = async (
+    fileType: string,
+    diagnostic: string,
+    exitCode = 1,
+  ) => {
+    const fixture = new NativeFixtureRunner();
+    const result = await inspectNativeMacho({
+      target: nativeMachoTarget("/fixture/debug"),
+      run: async (tool, args, _signal, acceptNonZeroIf) => {
+        const base = await fixture.run(tool, args);
+        if (!base.ok) return base;
+        if (tool === "otool")
+          return ok({
+            ...base.value,
+            stdout: base.value.stdout.replace("EXECUTE", fileType),
+          });
+        if (tool === "dyld_info") {
+          const failed = {
+            ...base.value,
+            stdout: `/fixture/debug:\n${diagnostic}\n`,
+            stdoutBytes: Buffer.byteLength(diagnostic) + 17,
+            exitCode,
+          };
+          return acceptNonZeroIf?.(failed)
+            ? ok(failed)
+            : err(new AnalysisOutputError("inspect_macho", "dyld_info failed"));
+        }
+        return base;
+      },
+      invocation: (command) => ({
+        tool: command.tool,
+        command: [command.executable, ...command.arguments],
+        tool_version: command.toolVersion,
+        version_reason: command.versionReason,
+        executable_sha256: command.executableSha256,
+        exit: { code: command.exitCode, signal: command.signal },
+        stdout_bytes: command.stdoutBytes,
+        stderr_bytes: command.stderrBytes,
+      }),
+    });
+    return result;
+  };
+
+  it.each([
+    [
+      "DSYM",
+      "10",
+      "section '__TEXT/__text' has offset=0 but is not a zero-fill section type",
+    ],
+    ["CORE", "4", "unknown mh.filetype 4"],
+    ["FVMLIB", "3", "unknown mh.filetype 3"],
+  ] as const)(
+    "classifies the confirmed %s refusal with retained output",
+    async (_kind, fileType, diagnostic) => {
+      const result = await inspectRefusal(fileType, diagnostic);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error).toMatchObject({
+        _tag: "AnalysisUnsupportedTargetError",
+        diagnostics: { tool: "dyld_info", target_file_type: fileType },
+        capturedOutput: { exit_code: 1, truncated: false },
+      });
+      expect(result.error.capturedOutput?.stdout).toContain(diagnostic);
+    },
+  );
+
+  it("keeps a matching diagnostic on a different file type as an output failure", async () => {
+    const result = await inspectRefusal(
+      "EXECUTE",
+      "section '__TEXT/__text' has offset=0 but is not a zero-fill section type",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error._tag).toBe("AnalysisOutputError");
+  });
+
+  it("keeps an unexpected dyld failure as a command failure", async () => {
+    const result = await inspectRefusal("DSYM", "unexpected loader error");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatchObject({
+      _tag: "AnalysisOutputError",
+      reason: "dyld_info failed",
+    });
+  });
+});

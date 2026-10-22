@@ -1,7 +1,10 @@
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import type { EvidenceLocation } from "../domain/evidence.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
-import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
+import {
+  AnalysisOutputError,
+  AnalysisUnsupportedTargetError,
+} from "../domain/analysisErrorCore.js";
 import {
   inspectMachoSchema,
   type NativeCommandInvocation,
@@ -23,6 +26,7 @@ import {
   conflictingUuidCommandEvidence,
   isMissingUuidDyldFailure,
   missingUuidLimitation,
+  targetLayoutDyldRefusal,
   unusableNativeCommandOutput,
 } from "./NativeMachoCommandDiagnostics.js";
 
@@ -107,7 +111,11 @@ export const inspectNativeMacho = async (
         context.target.path,
       ],
       context.signal,
-      tool === "dyld_info" ? isMissingUuidDyldFailure : undefined,
+      tool === "dyld_info"
+        ? (capture) =>
+            isMissingUuidDyldFailure(capture) ||
+            targetLayoutDyldRefusal(capture) !== null
+        : undefined,
     );
   // vtool knows no variant subtypes, so no spelling selects an arm64e.x1 slice.
   const vtoolSelectsSlice =
@@ -126,7 +134,8 @@ export const inspectNativeMacho = async (
     if (!captured.ok) return err(captured.error);
     if (
       (captured.value.exitCode !== 0 || captured.value.signal !== null) &&
-      !isMissingUuidDyldFailure(captured.value)
+      !isMissingUuidDyldFailure(captured.value) &&
+      targetLayoutDyldRefusal(captured.value) === null
     )
       return err(unusableNativeCommandOutput(captured.value));
     captures.push(captured.value);
@@ -175,6 +184,57 @@ export const inspectNativeMacho = async (
             stderr_bytes: otool.stderrBytes,
             exit_code: otool.exitCode,
             signal: otool.signal,
+          },
+        },
+      ),
+    );
+  }
+  const layoutRefusal = captures.find(
+    (capture) => targetLayoutDyldRefusal(capture) !== null,
+  );
+  if (layoutRefusal !== undefined) {
+    const diagnosedType = targetLayoutDyldRefusal(layoutRefusal);
+    // otool -h -l prints numeric MH_* file types; captured fixtures may use
+    // its verbose symbolic spelling. Both must confirm the diagnostic.
+    const fileTypeNumbers = { DSYM: "10", CORE: "4", FVMLIB: "3" } as const;
+    if (
+      diagnosedType === null ||
+      (load.fileType !== diagnosedType &&
+        load.fileType !== fileTypeNumbers[diagnosedType])
+    )
+      return err(unusableNativeCommandOutput(layoutRefusal));
+    const diagnostic =
+      withoutEchoedPathHeader(
+        layoutRefusal.stdout,
+        layoutRefusal.arguments.at(-1),
+      )
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .at(-1) ?? "";
+    return err(
+      new AnalysisUnsupportedTargetError(
+        "inspect_macho",
+        context.target.path,
+        `dyld_info cannot inspect this ${diagnosedType} layout: ${diagnostic}`,
+        {
+          remediationAction:
+            diagnosedType === "DSYM"
+              ? "Inspect the matching executable for code facts; use a supported dSYM attachment workflow for source symbols."
+              : "Select a loadable Mach-O image for inspect-macho; this file type is outside native dyld inspection.",
+          diagnostics: {
+            tool: layoutRefusal.tool,
+            exit_code: layoutRefusal.exitCode,
+            target_file_type: load.fileType,
+          },
+          capturedOutput: {
+            stdout: layoutRefusal.stdout,
+            stderr: layoutRefusal.stderr,
+            truncated: false,
+            stdout_bytes: layoutRefusal.stdoutBytes,
+            stderr_bytes: layoutRefusal.stderrBytes,
+            exit_code: layoutRefusal.exitCode,
+            signal: layoutRefusal.signal,
           },
         },
       ),
